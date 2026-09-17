@@ -263,9 +263,19 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 		const ADroneCaptureCamera* CamCapture = Cast<ADroneCaptureCamera>(CamActor);
 		const int32 SupersampleFactor = CamCapture ? FMath::Max(1, CamCapture->SupersampleFactor) : 1;
 
+		// "Drone nao aparece pra essa camera" -- oclusao total ou fora do
+		// campo de visao (bbox_pequena/bbox_na_borda ainda tem um drone de
+		// verdade visivel, so nao passou no criterio de qualidade, entao nao
+		// contam como negativo aqui).
+		const bool bDroneNotVisible = Result.Status == EPoseCheckStatus::Oclusao || Result.Status == EPoseCheckStatus::ForaDoCampoDeVisao;
+
 		if (Result.Status == EPoseCheckStatus::Ok)
 		{
 			ExportSample(CamLabel, SampleKey, RgbComp, Result.BboxMin, Result.BboxMax, Result.RtWidth, Result.RtHeight, SupersampleFactor);
+		}
+		else if (bDroneNotVisible && bSaveNegativeSamples && FMath::FRand() < NegativeSampleChance)
+		{
+			ExportNegativeSample(CamLabel, SampleKey, RgbComp, SupersampleFactor);
 		}
 		else if (bSaveDiscardDebug)
 		{
@@ -759,6 +769,31 @@ void ADroneCaptureController::ExportSample(const FString& CamLabel, const FStrin
 	const FString LabelPath = FPaths::Combine(LabelsDir, BaseName + TEXT(".txt"));
 	const FString LabelContent = FString::Printf(TEXT("0 %.6f %.6f %.6f %.6f\n"), Xc, Yc, W, H);
 	FFileHelper::SaveStringToFile(LabelContent, *LabelPath);
+}
+
+void ADroneCaptureController::ExportNegativeSample(const FString& CamLabel, const FString& SampleKey, USceneCaptureComponent2D* RgbComp, int32 SupersampleFactor) const
+{
+	if (!RgbComp || !RgbComp->TextureTarget)
+	{
+		return;
+	}
+
+	const FString EffectiveDir = GetEffectiveOutputDir();
+	const FString ImagesDir = FPaths::Combine(EffectiveDir, TEXT("images"), Split);
+	const FString LabelsDir = FPaths::Combine(EffectiveDir, TEXT("labels"), Split);
+	IFileManager::Get().MakeDirectory(*ImagesDir, true);
+	IFileManager::Get().MakeDirectory(*LabelsDir, true);
+
+	const FString BaseName = FString::Printf(TEXT("%s_%s"), *CamLabel, *SampleKey);
+
+	ExportCaptureToPng(RgbComp, SupersampleFactor, ImagesDir, BaseName + TEXT(".png"));
+
+	// Label VAZIO -- convencao YOLO pra "amostra negativa" (imagem sem
+	// nenhum objeto da classe). Cria o arquivo mesmo vazio (em vez de nao
+	// criar nenhum) pra deixar explicito que a ausencia de bbox e
+	// intencional, nao uma amostra que faltou processar.
+	const FString LabelPath = FPaths::Combine(LabelsDir, BaseName + TEXT(".txt"));
+	FFileHelper::SaveStringToFile(TEXT(""), *LabelPath);
 }
 
 void ADroneCaptureController::ExportDiscardDebug(const FString& Reason, const FString& CamLabel, const FString& SampleKey, USceneCaptureComponent2D* RgbComp, const FString& InfoText, int32 SupersampleFactor) const

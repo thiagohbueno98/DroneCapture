@@ -126,11 +126,40 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Qualidade")
 	int32 MinBboxAreaPx = 200;
 
+	// Margem (fracao da largura/altura) que a bbox precisa manter em relacao
+	// a borda da imagem pra NAO ser descartada. Default 0 -- desligado de
+	// proposito: o YOLO vai detectar drone em tempo real, e um drone
+	// entrando/saindo de quadro (bbox cortada na borda) e um caso real que
+	// precisa aparecer no dataset, nao um erro. A bbox ja vem recortada pros
+	// limites da imagem em ComputeProjectedBbox() -- com margem 0 essa
+	// checagem nunca dispara (a bbox recortada nunca ultrapassa os limites),
+	// entao toda pose com pelo menos MinBboxAreaPx de drone visivel na tela
+	// passa. Aumente pra um valor > 0 se quiser voltar a descartar poses
+	// cortadas (ex: dataset que so precisa de drone inteiro em quadro).
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Qualidade")
-	float EdgeMarginFraction = 0.02f;
+	float EdgeMarginFraction = 0.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Qualidade")
 	float MinVisibleFraction = 0.5f;
+
+	// ------------------------------------------------------------------
+	// Negativos -- quando o drone nao aparece pra uma camera (oclusao total
+	// ou fora do campo de visao), em vez de so descartar a pose, sorteia se
+	// salva ela como amostra NEGATIVA (imagem + label VAZIO, convencao YOLO
+	// pra "sem objeto"). Importante pro detector aprender a nao alucinar
+	// drone em fundo vazio -- mas nao salva 100% dos casos de proposito: a
+	// fracao de poses sem drone visivel tende a ser BEM maior que a de
+	// poses com drone, salvar todas inundaria o dataset com fundo repetido.
+	// ------------------------------------------------------------------
+
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Negativos")
+	bool bSaveNegativeSamples = true;
+
+	// Chance (0-1) de UMA pose sem drone visivel virar amostra negativa
+	// exportada. Ex: 0.05 = ~5% dessas poses viram negativo, o resto so e
+	// descartado (ou vai pro debug_descartados/ se bSaveDiscardDebug=true).
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Negativos", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float NegativeSampleChance = 0.05f;
 
 	// Pasta BASE -- o caminho de verdade usado na exportacao e
 	// GetEffectiveOutputDir() = OutputDir/DatasetName (ver abaixo). Separar
@@ -271,6 +300,11 @@ private:
 	FPoseCheckResult CheckPose(AActor* CamActor, USceneCaptureComponent2D* RgbComp) const;
 
 	void ExportSample(const FString& CamLabel, const FString& SampleKey, USceneCaptureComponent2D* RgbComp, const FVector2D& BboxMin, const FVector2D& BboxMax, int32 RtWidth, int32 RtHeight, int32 SupersampleFactor) const;
+
+	// Salva imagem + label VAZIO (convencao YOLO pra "sem objeto") -- usado
+	// pra amostras negativas sorteadas (ver bSaveNegativeSamples).
+	void ExportNegativeSample(const FString& CamLabel, const FString& SampleKey, USceneCaptureComponent2D* RgbComp, int32 SupersampleFactor) const;
+
 	void ExportDiscardDebug(const FString& Reason, const FString& CamLabel, const FString& SampleKey, USceneCaptureComponent2D* RgbComp, const FString& InfoText, int32 SupersampleFactor) const;
 
 	// Exporta RgbComp->TextureTarget pra PNG em OutDir/FileName. Se
