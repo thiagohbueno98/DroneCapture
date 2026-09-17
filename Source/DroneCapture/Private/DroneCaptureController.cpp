@@ -575,20 +575,45 @@ TArray<FVector> ADroneCaptureController::GetDroneCorners() const
 		return Corners;
 	}
 
-	FVector Origin, Extent;
-	Drone->GetActorBounds(true, Origin, Extent);
-
-	Corners.Reserve(8);
-	for (int32 Sx = -1; Sx <= 1; Sx += 2)
+	// Cantos de CADA componente com colisao (Corpo + helices), na
+	// orientacao REAL de cada um (transform de mundo do proprio
+	// componente -- preserva o yaw do drone e a inclinacao propria de cada
+	// helice) -- em vez do AABB do ATOR INTEIRO (GetActorBounds antigo),
+	// que e sempre alinhado aos eixos do MUNDO. Um AABB alinhado ao mundo
+	// precisa "abracar" a silhueta rotacionada inteira; num yaw de ~45 graus
+	// isso sobra ate ~41% de area vazia nos cantos, deixando a bbox 2D
+	// visivelmente maior que o drone de verdade (achado pelo usuario
+	// comparando bbox exportada com a imagem). Amostrar os 8 cantos de CADA
+	// componente na orientacao certa da uma bbox final bem mais justa.
+	// Mesmo criterio "so com colisao" do GetActorBounds antigo, via
+	// IsCollisionEnabled().
+	for (UActorComponent* ActorComp : Drone->GetComponents())
 	{
-		for (int32 Sy = -1; Sy <= 1; Sy += 2)
+		UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(ActorComp);
+		if (!Prim || !Prim->IsCollisionEnabled())
 		{
-			for (int32 Sz = -1; Sz <= 1; Sz += 2)
+			continue;
+		}
+
+		const FBox LocalBox = Prim->CalcBounds(FTransform::Identity).GetBox();
+		if (!LocalBox.IsValid)
+		{
+			continue;
+		}
+
+		const FTransform WorldTransform = Prim->GetComponentTransform();
+		for (int32 Sx = -1; Sx <= 1; Sx += 2)
+		{
+			for (int32 Sy = -1; Sy <= 1; Sy += 2)
 			{
-				Corners.Add(FVector(
-					Origin.X + Sx * Extent.X,
-					Origin.Y + Sy * Extent.Y,
-					Origin.Z + Sz * Extent.Z));
+				for (int32 Sz = -1; Sz <= 1; Sz += 2)
+				{
+					const FVector LocalCorner(
+						Sx > 0 ? LocalBox.Max.X : LocalBox.Min.X,
+						Sy > 0 ? LocalBox.Max.Y : LocalBox.Min.Y,
+						Sz > 0 ? LocalBox.Max.Z : LocalBox.Min.Z);
+					Corners.Add(WorldTransform.TransformPosition(LocalCorner));
+				}
 			}
 		}
 	}
@@ -666,6 +691,24 @@ bool ADroneCaptureController::ComputeProjectedBbox(AActor* CamActor, USceneCaptu
 		{
 			return false;
 		}
+
+		// Canto perto de 90 graus do eixo da camera (Local.X positivo mas
+		// bem pequeno, ver ProjectPoint) faz a divisao de perspectiva
+		// "explodir" -- cantos do MESMO drone a poucos cm de distancia no
+		// mundo podem projetar em sinais opostos e magnitudes de dezenas de
+		// milhares de pixels. Isso contamina o Min/Max do bbox e, depois de
+		// recortado pros limites da imagem, vira um retangulo espurio
+		// grudado num canto -- SEM o drone aparecer de verdade (achado
+		// revisando imagens de debug: bbox no canto, cena vazia). Descarta
+		// a pose inteira se qualquer canto projetar bem alem da imagem
+		// (aqui, 4x a resolucao) -- um corte de borda LEGITIMO (drone de
+		// verdade entrando/saindo de quadro) nunca projeta tao longe, so a
+		// explosao numerica da singularidade produz valores nessa ordem.
+		if (FMath::Abs(Screen.X) > OutWidth * 4.0f || FMath::Abs(Screen.Y) > OutHeight * 4.0f)
+		{
+			return false;
+		}
+
 		MinX = FMath::Min(MinX, Screen.X);
 		MaxX = FMath::Max(MaxX, Screen.X);
 		MinY = FMath::Min(MinY, Screen.Y);
