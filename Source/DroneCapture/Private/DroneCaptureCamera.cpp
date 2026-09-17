@@ -17,23 +17,39 @@ ADroneCaptureCamera::ADroneCaptureCamera()
 		Comp->bCaptureOnMovement = false;
 	}
 
-	// Segunda captura so pra mascara de segmentacao do drone -- usa o
-	// material de "Buffer Visualization" do proprio Engine (CustomStencil),
-	// nao precisa criar asset novo nenhum. A cena inteira continua sendo
-	// desenhada normalmente nessa passada (oclusao de verdade funciona
-	// igual a RGB) -- so a cor final e substituida por essa visualizacao.
+	// Segunda captura so pra mascara de segmentacao do drone -- material
+	// PROPRIO (/DroneCapture/Materials/M_DroneMask, criado via
+	// ue_python/criar_material_mascara_drone.py), nao o material de "Buffer
+	// Visualization" do Engine (/Engine/BufferVisualization/CustomStencil):
+	// testado 2026-09-17, esse saia branco/estourado -- mesmo sintoma do
+	// gotcha ja documentado em contexto.md (BL_SCENE_COLOR_AFTER_TONEMAPPING
+	// nao acessa CustomStencil direito). M_DroneMask usa
+	// BL_SCENE_COLOR_BEFORE_DOF (confirmado funcionando) + comparacao
+	// explicita no proprio material (preto/branco solido, sem depender de
+	// tonemapping/exposicao pra separar os dois). A cena inteira continua
+	// sendo desenhada normalmente nessa passada -- oclusao de verdade
+	// funciona igual a RGB, so a cor final e substituida.
 	MaskCaptureComponent = CreateDefaultSubobject<USceneCaptureComponent2D>(TEXT("MaskCaptureComponent"));
 	MaskCaptureComponent->SetupAttachment(RootComponent);
 	MaskCaptureComponent->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
 	MaskCaptureComponent->bCaptureEveryFrame = false;
 	MaskCaptureComponent->bCaptureOnMovement = false;
 
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> MaskMaterialFinder(TEXT("/Engine/BufferVisualization/CustomStencil.CustomStencil"));
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> MaskMaterialFinder(TEXT("/DroneCapture/Materials/M_DroneMask.M_DroneMask"));
 	if (MaskMaterialFinder.Succeeded())
 	{
 		MaskCaptureComponent->PostProcessSettings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, MaskMaterialFinder.Object));
 	}
 	MaskCaptureComponent->PostProcessBlendWeight = 1.0f;
+
+	// Auto exposure alteraria o preto/branco solido do material (ele mexe no
+	// brilho ANTES do material entrar, na fase de tonemap) -- fixa em EV
+	// neutro pra mascara sair sempre igual, sem depender de quao clara/
+	// escura a cena de fundo esta.
+	MaskCaptureComponent->PostProcessSettings.bOverride_AutoExposureMethod = true;
+	MaskCaptureComponent->PostProcessSettings.AutoExposureMethod = EAutoExposureMethod::AEM_Manual;
+	MaskCaptureComponent->PostProcessSettings.bOverride_AutoExposureBias = true;
+	MaskCaptureComponent->PostProcessSettings.AutoExposureBias = 0.0f;
 }
 
 void ADroneCaptureCamera::BeginPlay()
