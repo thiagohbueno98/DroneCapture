@@ -8,6 +8,34 @@
 #include "UObject/ConstructorHelpers.h"
 #include "EngineUtils.h"
 
+namespace
+{
+	// Vinheta/grao de filme/lens flare/motion blur/bloom sao aplicados numa
+	// etapa DEPOIS de BL_SCENE_COLOR_BEFORE_DOF (onde M_DroneMask substitui
+	// a cor) -- sem desligar isso na captura de mascara tambem, esses
+	// efeitos continuam manchando o preto/branco solido por cima (achado
+	// rodando de verdade: vinheta/grao visivel nas bordas mesmo com
+	// Opacity=1 no material). DOF tambem borraria a borda nitida da
+	// silhueta -- fstop bem alto deixa o DOF praticamente sem efeito.
+	void DisableArtisticPostProcessEffects(FPostProcessSettings& Pps)
+	{
+		Pps.bOverride_MotionBlurAmount = true;
+		Pps.MotionBlurAmount = 0.0f;
+		Pps.bOverride_SceneFringeIntensity = true;
+		Pps.SceneFringeIntensity = 0.0f;
+		Pps.bOverride_VignetteIntensity = true;
+		Pps.VignetteIntensity = 0.0f;
+		Pps.bOverride_FilmGrainIntensity = true;
+		Pps.FilmGrainIntensity = 0.0f;
+		Pps.bOverride_LensFlareIntensity = true;
+		Pps.LensFlareIntensity = 0.0f;
+		Pps.bOverride_DepthOfFieldFstop = true;
+		Pps.DepthOfFieldFstop = 32.0f;
+		Pps.bOverride_BloomIntensity = true;
+		Pps.BloomIntensity = 0.0f;
+	}
+}
+
 ADroneCaptureCamera::ADroneCaptureCamera()
 {
 	if (USceneCaptureComponent2D* Comp = GetCaptureComponent2D())
@@ -50,6 +78,8 @@ ADroneCaptureCamera::ADroneCaptureCamera()
 	MaskCaptureComponent->PostProcessSettings.AutoExposureMethod = EAutoExposureMethod::AEM_Manual;
 	MaskCaptureComponent->PostProcessSettings.bOverride_AutoExposureBias = true;
 	MaskCaptureComponent->PostProcessSettings.AutoExposureBias = 0.0f;
+
+	DisableArtisticPostProcessEffects(MaskCaptureComponent->PostProcessSettings);
 }
 
 void ADroneCaptureCamera::BeginPlay()
@@ -130,18 +160,7 @@ void ADroneCaptureCamera::ConfigurePostProcess()
 	// Efeitos pensados pra camera de jogo/cinematica, nao pra "vigilancia"
 	// estatica -- so introduzem blur/ruido que o detector nao deveria
 	// aprender.
-	Pps.bOverride_MotionBlurAmount = true;
-	Pps.MotionBlurAmount = 0.0f;
-	Pps.bOverride_SceneFringeIntensity = true;
-	Pps.SceneFringeIntensity = 0.0f;
-	Pps.bOverride_VignetteIntensity = true;
-	Pps.VignetteIntensity = 0.0f;
-	Pps.bOverride_FilmGrainIntensity = true;
-	Pps.FilmGrainIntensity = 0.0f;
-	Pps.bOverride_LensFlareIntensity = true;
-	Pps.LensFlareIntensity = 0.0f;
-	Pps.bOverride_DepthOfFieldFstop = true;
-	Pps.DepthOfFieldFstop = 32.0f; // DOF praticamente infinito
+	DisableArtisticPostProcessEffects(Pps);
 
 	Comp->PostProcessBlendWeight = 1.0f;
 }
