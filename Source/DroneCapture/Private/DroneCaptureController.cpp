@@ -581,6 +581,19 @@ void ADroneCaptureController::ConfigureDroneMask()
 		return;
 	}
 
+	// r.CustomDepth precisa estar em 3 ("Enabled with Stencil") pro
+	// CustomStencil funcionar -- o default da ENGINE e 1 ("enabled, sem
+	// stencil"), e nenhum projeto novo vem com isso configurado (achado
+	// rodando de verdade: com r.CustomDepth=1, CustomStencil sai sempre
+	// 0/preto em QUALQUER objeto, nao importa o que configure nos
+	// componentes -- ver contexto.md). Forcado aqui via console command
+	// pra funcionar em qualquer projeto novo sem passo manual nenhum
+	// (documentar no README nao seria suficiente -- usuario esqueceria).
+	if (UWorld* World = GetWorld())
+	{
+		UKismetSystemLibrary::ExecuteConsoleCommand(World, TEXT("r.CustomDepth 3"));
+	}
+
 	// TODOS os componentes visuais do drone (nao so os com colisao -- aqui
 	// queremos a silhueta VISIVEL de verdade, colisao nao importa mais).
 	for (UActorComponent* ActorComp : Drone->GetComponents())

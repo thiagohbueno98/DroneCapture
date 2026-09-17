@@ -70,14 +70,13 @@ ADroneCaptureCamera::ADroneCaptureCamera()
 	}
 	MaskCaptureComponent->PostProcessBlendWeight = 1.0f;
 
-	// Auto exposure alteraria o preto/branco solido do material (ele mexe no
-	// brilho ANTES do material entrar, na fase de tonemap) -- fixa em EV
-	// neutro pra mascara sair sempre igual, sem depender de quao clara/
-	// escura a cena de fundo esta.
-	MaskCaptureComponent->PostProcessSettings.bOverride_AutoExposureMethod = true;
-	MaskCaptureComponent->PostProcessSettings.AutoExposureMethod = EAutoExposureMethod::AEM_Manual;
-	MaskCaptureComponent->PostProcessSettings.bOverride_AutoExposureBias = true;
-	MaskCaptureComponent->PostProcessSettings.AutoExposureBias = 0.0f;
+	// NAO forcar AEM_Manual aqui -- achado rodando de verdade (testes via
+	// Python Editor Scripting, ver contexto.md): exposicao manual sem
+	// TAMBEM configurar abertura/ISO/shutter deixa a cena escura demais e
+	// apaga o branco solido do material (emissive 10.0) de volta pra
+	// preto. O Opacity=1 do material ja substitui a cor da cena inteira,
+	// entao o auto-exposure padrao (Histogram) funciona bem o suficiente
+	// sem precisar fixar nada aqui.
 
 	DisableArtisticPostProcessEffects(MaskCaptureComponent->PostProcessSettings);
 }
