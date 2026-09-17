@@ -137,7 +137,6 @@ void ADroneCaptureController::StartCapture()
 
 	PoseIndex = 0;
 	WarmupFramesLeft = -1;
-	PendingPoseResults.Reset();
 	DiscardCountByReason.Reset();
 
 	const int32 YawCount = GetYawCount();
@@ -198,9 +197,10 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 	const int32 PointIndex = PoseIndex / YawCount;
 	const int32 YawIdx = PoseIndex % YawCount;
 
-	// Fase 1 (WarmupFramesLeft == -1): pose nova -- move o drone, calcula
-	// CheckPose (geometrico, nao depende de frame renderizado, pode ser
-	// feito 1x so) pra cada camera, e agenda os frames de aquecimento.
+	// Fase 1 (WarmupFramesLeft == -1): pose nova -- move o drone e agenda os
+	// frames de aquecimento. A checagem de oclusao/bbox (via mascara, ver
+	// CheckPoseFromMask) so acontece na Fase 3, depois de existir um frame
+	// de verdade renderizado pra capturar.
 	if (WarmupFramesLeft < 0)
 	{
 		const FVector Point = GridPoints[PointIndex];
@@ -213,14 +213,6 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 		Drone->SetActorLocation(Point);
 		Drone->SetActorRotation(FRotator(0.0f, Yaw, 0.0f));
 		PendingYawDeg = Yaw;
-
-		PendingPoseResults.SetNum(Cameras.Num());
-		for (int32 i = 0; i < Cameras.Num(); ++i)
-		{
-			AActor* CamActor = Cameras[i];
-			USceneCaptureComponent2D* RgbComp = CameraComponents.IsValidIndex(i) ? CameraComponents[i] : nullptr;
-			PendingPoseResults[i] = (CamActor && RgbComp) ? CheckPose(CamActor, RgbComp) : FPoseCheckResult();
-		}
 
 		WarmupFramesLeft = FMath::Max(WarmupCaptures, 1);
 		return; // deixa os proximos Ticks (reais) acumularem o historico temporal
@@ -243,31 +235,37 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 		return;
 	}
 
-	// Fase 3 (WarmupFramesLeft == 0): aquecimento concluido -- exporta usando
-	// o TextureTarget preenchido pelo ultimo CaptureScene() da fase 2 (nenhum
+	// Fase 3 (WarmupFramesLeft == 0): aquecimento da imagem RGB concluido --
+	// captura a mascara (1 frame so, sem GI/Lumen, nao precisa de
+	// aquecimento), le os pixels de volta e decide oclusao/bbox a partir do
+	// que realmente apareceu. Exporta o RGB usando o TextureTarget
+	// preenchido pelo ultimo CaptureScene() da fase 2 (nenhum
 	// ExportSample/ExportDiscardDebug chama CaptureScene() de novo).
 	const FVector Point = GridPoints[PointIndex];
 	for (int32 i = 0; i < Cameras.Num(); ++i)
 	{
 		AActor* CamActor = Cameras[i];
 		USceneCaptureComponent2D* RgbComp = CameraComponents.IsValidIndex(i) ? CameraComponents[i] : nullptr;
-		if (!CamActor || !RgbComp || !PendingPoseResults.IsValidIndex(i))
+		const ADroneCaptureCamera* CamCapture = Cast<ADroneCaptureCamera>(CamActor);
+		USceneCaptureComponent2D* MaskComp = CamCapture ? CamCapture->GetMaskCaptureComponent() : nullptr;
+		if (!CamActor || !RgbComp || !MaskComp)
 		{
 			continue;
 		}
 
+		MaskComp->CaptureScene();
+		const FPoseCheckResult Result = CheckPoseFromMask(MaskComp);
+
 		const FString CamLabel = FString::Printf(TEXT("CaptureCam%d"), i + 1);
 		const FString SampleKey = FString::FromInt(PoseIndex);
-		const FPoseCheckResult& Result = PendingPoseResults[i];
-
-		const ADroneCaptureCamera* CamCapture = Cast<ADroneCaptureCamera>(CamActor);
 		const int32 SupersampleFactor = CamCapture ? FMath::Max(1, CamCapture->SupersampleFactor) : 1;
 
-		// "Drone nao aparece pra essa camera" -- oclusao total ou fora do
-		// campo de visao (bbox_pequena/bbox_na_borda ainda tem um drone de
-		// verdade visivel, so nao passou no criterio de qualidade, entao nao
-		// contam como negativo aqui).
-		const bool bDroneNotVisible = Result.Status == EPoseCheckStatus::Oclusao || Result.Status == EPoseCheckStatus::ForaDoCampoDeVisao;
+		// "Drone nao aparece pra essa camera" -- nenhum pixel da mascara
+		// detectado (oclusao total ou fora do campo de visao; a mascara nao
+		// distingue os dois casos, e nao precisa -- bbox_pequena ainda tem
+		// um drone de verdade visivel, so nao passou no criterio de
+		// qualidade, entao nao conta como negativo aqui).
+		const bool bDroneNotVisible = Result.Status == EPoseCheckStatus::Oclusao;
 
 		if (Result.Status == EPoseCheckStatus::Ok)
 		{
@@ -287,6 +285,11 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 				const FString Info = FString::Printf(TEXT("pose_index=%d ponto=%s yaw=%.1f"), PoseIndex, *Point.ToString(), PendingYawDeg);
 				ExportDiscardDebug(Reason, CamLabel, SampleKey, RgbComp, Info, SupersampleFactor);
 			}
+		}
+
+		if (bSaveMaskDebug)
+		{
+			ExportMaskDebug(MaskComp, CamLabel, SampleKey);
 		}
 	}
 
@@ -475,6 +478,8 @@ void ADroneCaptureController::ResolveSceneReferences()
 		}
 	}
 
+	ConfigureDroneMask();
+
 	if (!Drone)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[DroneCapture] Drone nao encontrado (referencia vazia e nenhum ator com tag 'DroneAlvo')."));
@@ -564,163 +569,81 @@ void ADroneCaptureController::WriteDataYaml() const
 }
 
 // ============================================================
-// Oclusao / projecao / qualidade (equivalente a capture_core.py)
+// Mascara de segmentacao (equivalente a capture_core.py, mas por pixel
+// de verdade em vez de raycast+projecao geometrica -- ver comentario em
+// EdgeMarginFraction/MaskStencilValue no header pro porque da mudanca)
 // ============================================================
 
-TArray<FVector> ADroneCaptureController::GetDroneCorners() const
+void ADroneCaptureController::ConfigureDroneMask()
 {
-	TArray<FVector> Corners;
 	if (!Drone)
 	{
-		return Corners;
+		return;
 	}
 
-	// Cantos de CADA componente com colisao (Corpo + helices), na
-	// orientacao REAL de cada um (transform de mundo do proprio
-	// componente -- preserva o yaw do drone e a inclinacao propria de cada
-	// helice) -- em vez do AABB do ATOR INTEIRO (GetActorBounds antigo),
-	// que e sempre alinhado aos eixos do MUNDO. Um AABB alinhado ao mundo
-	// precisa "abracar" a silhueta rotacionada inteira; num yaw de ~45 graus
-	// isso sobra ate ~41% de area vazia nos cantos, deixando a bbox 2D
-	// visivelmente maior que o drone de verdade (achado pelo usuario
-	// comparando bbox exportada com a imagem). Amostrar os 8 cantos de CADA
-	// componente na orientacao certa da uma bbox final bem mais justa.
-	// Mesmo criterio "so com colisao" do GetActorBounds antigo, via
-	// IsCollisionEnabled().
+	// TODOS os componentes visuais do drone (nao so os com colisao -- aqui
+	// queremos a silhueta VISIVEL de verdade, colisao nao importa mais).
 	for (UActorComponent* ActorComp : Drone->GetComponents())
 	{
-		UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(ActorComp);
-		if (!Prim || !Prim->IsCollisionEnabled())
+		if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(ActorComp))
 		{
-			continue;
-		}
-
-		const FBox LocalBox = Prim->CalcBounds(FTransform::Identity).GetBox();
-		if (!LocalBox.IsValid)
-		{
-			continue;
-		}
-
-		const FTransform WorldTransform = Prim->GetComponentTransform();
-		for (int32 Sx = -1; Sx <= 1; Sx += 2)
-		{
-			for (int32 Sy = -1; Sy <= 1; Sy += 2)
-			{
-				for (int32 Sz = -1; Sz <= 1; Sz += 2)
-				{
-					const FVector LocalCorner(
-						Sx > 0 ? LocalBox.Max.X : LocalBox.Min.X,
-						Sy > 0 ? LocalBox.Max.Y : LocalBox.Min.Y,
-						Sz > 0 ? LocalBox.Max.Z : LocalBox.Min.Z);
-					Corners.Add(WorldTransform.TransformPosition(LocalCorner));
-				}
-			}
+			Prim->SetRenderCustomDepth(true);
+			Prim->SetCustomDepthStencilValue(MaskStencilValue);
 		}
 	}
-	return Corners;
 }
 
-int32 ADroneCaptureController::CountVisibleCorners(AActor* CamActor, const FVector& CamLocation, const TArray<FVector>& Corners) const
+bool ADroneCaptureController::ComputeMaskBbox(UTextureRenderTarget2D* MaskTarget, FVector2D& OutMin, FVector2D& OutMax) const
 {
-	int32 Visible = 0;
-	const ECollisionChannel Channel = UEngineTypes::ConvertToCollisionChannel(ETraceTypeQuery::TraceTypeQuery1);
-
-	FCollisionQueryParams Params;
-	Params.bTraceComplex = true;
-	if (Drone)
-	{
-		Params.AddIgnoredActor(Drone);
-	}
-
-	UWorld* World = GetWorld();
-	for (const FVector& Corner : Corners)
-	{
-		FHitResult Hit;
-		const bool bHit = World->LineTraceSingleByChannel(Hit, CamLocation, Corner, Channel, Params);
-		if (!bHit)
-		{
-			Visible++;
-		}
-	}
-	return Visible;
-}
-
-bool ADroneCaptureController::ProjectPoint(const FVector& CamLocation, const FRotator& CamRotation, float FocalLenX, float FocalLenY, int32 Width, int32 Height, const FVector& WorldPoint, FVector2D& OutScreen)
-{
-	const FVector Offset = WorldPoint - CamLocation;
-	const FVector Local = CamRotation.UnrotateVector(Offset); // Local.X=frente, Y=direita, Z=cima
-
-	if (Local.X <= 1.0f)
+	if (!MaskTarget)
 	{
 		return false;
 	}
 
-	OutScreen.X = Width / 2.0f + (Local.Y / Local.X) * FocalLenX;
-	OutScreen.Y = Height / 2.0f - (Local.Z / Local.X) * FocalLenY;
+	FTextureRenderTargetResource* RTResource = MaskTarget->GameThread_GetRenderTargetResource();
+	if (!RTResource)
+	{
+		return false;
+	}
+
+	TArray<FColor> Pixels;
+	if (!RTResource->ReadPixels(Pixels) || Pixels.Num() <= 0)
+	{
+		return false;
+	}
+
+	const int32 Width = MaskTarget->SizeX;
+	const int32 Height = MaskTarget->SizeY;
+	if (Pixels.Num() != Width * Height)
+	{
+		return false;
+	}
+
+	int32 MinX = Width, MaxX = -1, MinY = Height, MaxY = -1;
+	for (int32 Y = 0; Y < Height; ++Y)
+	{
+		const int32 RowOffset = Y * Width;
+		for (int32 X = 0; X < Width; ++X)
+		{
+			const FColor& Pixel = Pixels[RowOffset + X];
+			if (Pixel.R > MaskPixelThreshold || Pixel.G > MaskPixelThreshold || Pixel.B > MaskPixelThreshold)
+			{
+				MinX = FMath::Min(MinX, X);
+				MaxX = FMath::Max(MaxX, X);
+				MinY = FMath::Min(MinY, Y);
+				MaxY = FMath::Max(MaxY, Y);
+			}
+		}
+	}
+
+	if (MaxX < MinX || MaxY < MinY)
+	{
+		return false; // nenhum pixel de drone encontrado
+	}
+
+	OutMin = FVector2D((float)MinX, (float)MinY);
+	OutMax = FVector2D((float)(MaxX + 1), (float)(MaxY + 1));
 	return true;
-}
-
-bool ADroneCaptureController::ComputeProjectedBbox(AActor* CamActor, USceneCaptureComponent2D* RgbComp, const TArray<FVector>& Corners, FVector2D& OutMin, FVector2D& OutMax, int32& OutWidth, int32& OutHeight) const
-{
-	OutWidth = FallbackRtWidth;
-	OutHeight = FallbackRtHeight;
-	if (RgbComp->TextureTarget)
-	{
-		OutWidth = RgbComp->TextureTarget->SizeX;
-		OutHeight = RgbComp->TextureTarget->SizeY;
-	}
-
-	const float FovHDeg = RgbComp->FOVAngle;
-	const float FocalLenX = (OutWidth / 2.0f) / FMath::Tan(FMath::DegreesToRadians(FovHDeg) / 2.0f);
-	const float Aspect = (float)OutWidth / (float)OutHeight;
-	const float FovVDeg = 2.0f * FMath::RadiansToDegrees(FMath::Atan(FMath::Tan(FMath::DegreesToRadians(FovHDeg) / 2.0f) / Aspect));
-	const float FocalLenY = (OutHeight / 2.0f) / FMath::Tan(FMath::DegreesToRadians(FovVDeg) / 2.0f);
-
-	const FVector CamLocation = CamActor->GetActorLocation();
-	const FRotator CamRotation = CamActor->GetActorRotation();
-
-	float MinX = TNumericLimits<float>::Max();
-	float MaxX = TNumericLimits<float>::Lowest();
-	float MinY = TNumericLimits<float>::Max();
-	float MaxY = TNumericLimits<float>::Lowest();
-
-	for (const FVector& Corner : Corners)
-	{
-		FVector2D Screen;
-		if (!ProjectPoint(CamLocation, CamRotation, FocalLenX, FocalLenY, OutWidth, OutHeight, Corner, Screen))
-		{
-			return false;
-		}
-
-		// Canto perto de 90 graus do eixo da camera (Local.X positivo mas
-		// bem pequeno, ver ProjectPoint) faz a divisao de perspectiva
-		// "explodir" -- cantos do MESMO drone a poucos cm de distancia no
-		// mundo podem projetar em sinais opostos e magnitudes de dezenas de
-		// milhares de pixels. Isso contamina o Min/Max do bbox e, depois de
-		// recortado pros limites da imagem, vira um retangulo espurio
-		// grudado num canto -- SEM o drone aparecer de verdade (achado
-		// revisando imagens de debug: bbox no canto, cena vazia). Descarta
-		// a pose inteira se qualquer canto projetar bem alem da imagem
-		// (aqui, 4x a resolucao) -- um corte de borda LEGITIMO (drone de
-		// verdade entrando/saindo de quadro) nunca projeta tao longe, so a
-		// explosao numerica da singularidade produz valores nessa ordem.
-		if (FMath::Abs(Screen.X) > OutWidth * 4.0f || FMath::Abs(Screen.Y) > OutHeight * 4.0f)
-		{
-			return false;
-		}
-
-		MinX = FMath::Min(MinX, Screen.X);
-		MaxX = FMath::Max(MaxX, Screen.X);
-		MinY = FMath::Min(MinY, Screen.Y);
-		MaxY = FMath::Max(MaxY, Screen.Y);
-	}
-
-	OutMin.X = FMath::Max(0.0f, MinX);
-	OutMin.Y = FMath::Max(0.0f, MinY);
-	OutMax.X = FMath::Min((float)OutWidth, MaxX);
-	OutMax.Y = FMath::Min((float)OutHeight, MaxY);
-
-	return OutMax.X > OutMin.X && OutMax.Y > OutMin.Y;
 }
 
 EPoseCheckStatus ADroneCaptureController::BboxQualityReason(const FVector2D& Min, const FVector2D& Max, int32 Width, int32 Height) const
@@ -741,31 +664,28 @@ EPoseCheckStatus ADroneCaptureController::BboxQualityReason(const FVector2D& Min
 	return EPoseCheckStatus::Ok;
 }
 
-FPoseCheckResult ADroneCaptureController::CheckPose(AActor* CamActor, USceneCaptureComponent2D* RgbComp) const
+FPoseCheckResult ADroneCaptureController::CheckPoseFromMask(USceneCaptureComponent2D* MaskComp) const
 {
 	FPoseCheckResult Result;
 
-	const TArray<FVector> Corners = GetDroneCorners();
-	if (Corners.Num() == 0)
+	if (!MaskComp || !MaskComp->TextureTarget)
 	{
 		Result.Status = EPoseCheckStatus::Oclusao;
 		return Result;
 	}
 
-	const FVector CamLocation = CamActor->GetActorLocation();
-	const int32 Visible = CountVisibleCorners(CamActor, CamLocation, Corners);
+	// FlushRenderingCommands() de verdade -- CaptureScene() so enfileira o
+	// trabalho na render thread, precisa esperar terminar antes de ler os
+	// pixels de volta (mesmo motivo do ExportCaptureToPng()).
+	FlushRenderingCommands();
 
-	if ((float)Visible / (float)Corners.Num() < MinVisibleFraction)
-	{
-		Result.Status = EPoseCheckStatus::Oclusao;
-		return Result;
-	}
+	const int32 Width = MaskComp->TextureTarget->SizeX;
+	const int32 Height = MaskComp->TextureTarget->SizeY;
 
 	FVector2D BboxMin, BboxMax;
-	int32 Width, Height;
-	if (!ComputeProjectedBbox(CamActor, RgbComp, Corners, BboxMin, BboxMax, Width, Height))
+	if (!ComputeMaskBbox(MaskComp->TextureTarget, BboxMin, BboxMax))
 	{
-		Result.Status = EPoseCheckStatus::ForaDoCampoDeVisao;
+		Result.Status = EPoseCheckStatus::Oclusao; // nenhum pixel de drone -- oculto ou fora de campo, tanto faz
 		return Result;
 	}
 
@@ -854,6 +774,22 @@ void ADroneCaptureController::ExportDiscardDebug(const FString& Reason, const FS
 	ExportCaptureToPng(RgbComp, SupersampleFactor, OutDir, BaseName + TEXT(".png"));
 
 	FFileHelper::SaveStringToFile(InfoText + TEXT("\n"), *FPaths::Combine(OutDir, BaseName + TEXT(".txt")));
+}
+
+void ADroneCaptureController::ExportMaskDebug(USceneCaptureComponent2D* MaskComp, const FString& CamLabel, const FString& SampleKey) const
+{
+	if (!MaskComp || !MaskComp->TextureTarget)
+	{
+		return;
+	}
+
+	const FString OutDir = FPaths::Combine(GetEffectiveOutputDir(), TEXT("debug_mascara"));
+	IFileManager::Get().MakeDirectory(*OutDir, true);
+
+	const FString BaseName = FString::Printf(TEXT("%s_%s_mask"), *CamLabel, *SampleKey);
+
+	FlushRenderingCommands();
+	UKismetRenderingLibrary::ExportRenderTarget(const_cast<ADroneCaptureController*>(this), MaskComp->TextureTarget, OutDir, BaseName + TEXT(".png"));
 }
 
 void ADroneCaptureController::ExportCaptureToPng(USceneCaptureComponent2D* RgbComp, int32 SupersampleFactor, const FString& OutDir, const FString& FileName) const

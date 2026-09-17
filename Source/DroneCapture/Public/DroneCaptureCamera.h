@@ -4,6 +4,8 @@
 #include "Engine/SceneCapture2D.h"
 #include "DroneCaptureCamera.generated.h"
 
+class USceneCaptureComponent2D;
+
 /**
  * Camera de captura pronta pra uso -- traducao nativa de
  * setup_cena.py::configure_camera()/create_or_get_render_target(). Cria o
@@ -44,6 +46,13 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Drone Capture", meta = (ClampMin = "1", ClampMax = "4"))
 	int32 SupersampleFactor = 2;
 
+	// Segunda captura, so pra mascara de segmentacao do drone (ver
+	// ADroneCaptureController::CheckPoseFromMask) -- acha oclusao/bbox a
+	// partir dos pixels de verdade em vez de raycast+projecao geometrica.
+	// Sempre na resolucao FINAL (RtWidth x RtHeight, sem supersample --
+	// mascara binaria nao precisa de anti-aliasing extra).
+	USceneCaptureComponent2D* GetMaskCaptureComponent() const { return MaskCaptureComponent; }
+
 protected:
 	virtual void BeginPlay() override;
 
@@ -51,4 +60,7 @@ private:
 	void CreateRenderTarget();
 	void ConfigurePostProcess();
 	void CopyLevelLookIntoCapture();
+
+	UPROPERTY()
+	USceneCaptureComponent2D* MaskCaptureComponent = nullptr;
 };

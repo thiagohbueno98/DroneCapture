@@ -7,6 +7,7 @@
 
 class USceneCaptureComponent2D;
 class UDroneCaptureSetupWidget;
+class UTextureRenderTarget2D;
 
 UENUM(BlueprintType)
 enum class ESunPreset : uint8
@@ -114,15 +115,6 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Captura")
 	int32 WarmupCaptures = 5;
 
-	// Usado so se a camera nao tiver um TextureTarget valido ainda (nao
-	// deveria acontecer -- setup_cena.py sempre configura um). Resolucao
-	// real e lida do TextureTarget de cada camera em runtime.
-	UPROPERTY(EditAnywhere, Category = "Drone Capture|Captura")
-	int32 FallbackRtWidth = 1920;
-
-	UPROPERTY(EditAnywhere, Category = "Drone Capture|Captura")
-	int32 FallbackRtHeight = 1080;
-
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Qualidade")
 	int32 MinBboxAreaPx = 200;
 
@@ -130,22 +122,54 @@ public:
 	// a borda da imagem pra NAO ser descartada. Default 0 -- desligado de
 	// proposito: o YOLO vai detectar drone em tempo real, e um drone
 	// entrando/saindo de quadro (bbox cortada na borda) e um caso real que
-	// precisa aparecer no dataset, nao um erro. A bbox ja vem recortada pros
-	// limites da imagem em ComputeProjectedBbox() -- com margem 0 essa
-	// checagem nunca dispara (a bbox recortada nunca ultrapassa os limites),
-	// entao toda pose com pelo menos MinBboxAreaPx de drone visivel na tela
-	// passa. Aumente pra um valor > 0 se quiser voltar a descartar poses
-	// cortadas (ex: dataset que so precisa de drone inteiro em quadro).
+	// precisa aparecer no dataset, nao um erro. A bbox ja vem dos pixels
+	// reais da mascara (sempre dentro dos limites da imagem por construcao)
+	// -- com margem 0 essa checagem nunca dispara, entao toda pose com pelo
+	// menos MinBboxAreaPx de drone visivel na tela passa. Aumente pra um
+	// valor > 0 se quiser voltar a descartar poses cortadas (ex: dataset
+	// que so precisa de drone inteiro em quadro).
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Qualidade")
 	float EdgeMarginFraction = 0.0f;
 
-	UPROPERTY(EditAnywhere, Category = "Drone Capture|Qualidade")
-	float MinVisibleFraction = 0.5f;
+	// ------------------------------------------------------------------
+	// Mascara de segmentacao -- oclusao e bbox saem dos PIXELS DE VERDADE
+	// de uma segunda captura onde so o drone aparece (branco, via
+	// CustomStencil + material de Buffer Visualization nativo do Engine),
+	// em vez de aproximar por raycast+projecao geometrica. A cena inteira
+	// continua sendo desenhada normalmente nessa passada -- objetos na
+	// frente do drone bloqueiam ele igual na imagem RGB de verdade, sem
+	// depender da qualidade da malha de colisao do mapa (achado
+	// 2026-09-17: colisao simplificada de mapas grandes tipo o CitySample
+	// deixava o raycast antigo passar por baixo de beirais/telhados sem
+	// colisao complexa, gerando bbox falso-positiva). Tambem elimina a
+	// bbox inflada em yaws diagonais do AABB do ator antigo -- a bbox
+	// agora e sempre exatamente do tamanho da silhueta visivel.
+	// ------------------------------------------------------------------
+
+	// Valor de CustomDepth Stencil (0-255) usado SO nos componentes do
+	// drone. Mude se colidir com outro sistema do projeto que tambem use
+	// CustomStencil (ex: contorno de selecao/highlight) -- nesse caso esse
+	// outro objeto tambem apareceria branco na mascara, contaminando a
+	// bbox. Ligue bSaveMaskDebug pra conferir visualmente se a mascara sai
+	// limpa (so o drone, resto preto).
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Mascara")
+	int32 MaskStencilValue = 250;
+
+	// Intensidade minima (0-255) de qualquer canal RGB da mascara pra
+	// contar como pixel de drone -- filtra ruido de antialiasing na borda.
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Mascara")
+	int32 MaskPixelThreshold = 10;
+
+	// Salva a imagem crua da mascara (debug_mascara/) junto de cada pose
+	// processada, pra conferencia visual.
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Mascara")
+	bool bSaveMaskDebug = false;
 
 	// ------------------------------------------------------------------
-	// Negativos -- quando o drone nao aparece pra uma camera (oclusao total
-	// ou fora do campo de visao), em vez de so descartar a pose, sorteia se
-	// salva ela como amostra NEGATIVA (imagem + label VAZIO, convencao YOLO
+	// Negativos -- quando o drone nao aparece pra uma camera (nenhum pixel
+	// da mascara detectado -- oclusao total ou fora do campo de visao, a
+	// mascara nao distingue os dois casos), em vez de so descartar a pose,
+	// sorteia se salva ela como amostra NEGATIVA (imagem + label VAZIO, convencao YOLO
 	// pra "sem objeto"). Importante pro detector aprender a nao alucinar
 	// drone em fundo vazio -- mas nao salva 100% dos casos de proposito: a
 	// fracao de poses sem drone visivel tende a ser BEM maior que a de
@@ -267,11 +291,10 @@ private:
 	TMap<FString, int32> DiscardCountByReason;
 
 	// Estado da fase de "aquecimento" (ver comentario em WarmupCaptures) da
-	// pose atual. -1 = pose ainda nao comecou (precisa mover o drone e
-	// calcular CheckPose); >0 = ainda faltam N Ticks reais de CaptureScene()
-	// antes de poder exportar; 0 = aquecimento concluido, exporta neste Tick.
+	// pose atual. -1 = pose ainda nao comecou (precisa mover o drone); >0 =
+	// ainda faltam N Ticks reais de CaptureScene() antes de poder exportar;
+	// 0 = aquecimento concluido -- captura a mascara e exporta neste Tick.
 	int32 WarmupFramesLeft = -1;
-	TArray<FPoseCheckResult> PendingPoseResults;
 	float PendingYawDeg = 0.0f;
 
 	// Estado da rotacao das helices -- base capturada 1x por componente
@@ -292,12 +315,23 @@ private:
 	void ApplyQualitySettings();
 	void WriteDataYaml() const;
 
-	TArray<FVector> GetDroneCorners() const;
-	int32 CountVisibleCorners(AActor* CamActor, const FVector& CamLocation, const TArray<FVector>& Corners) const;
-	static bool ProjectPoint(const FVector& CamLocation, const FRotator& CamRotation, float FocalLenX, float FocalLenY, int32 Width, int32 Height, const FVector& WorldPoint, FVector2D& OutScreen);
-	bool ComputeProjectedBbox(AActor* CamActor, USceneCaptureComponent2D* RgbComp, const TArray<FVector>& Corners, FVector2D& OutMin, FVector2D& OutMax, int32& OutWidth, int32& OutHeight) const;
+	// Marca os componentes do drone com CustomStencil=MaskStencilValue --
+	// chamado 1x quando "Drone" e resolvido (ver ResolveSceneReferences()).
+	void ConfigureDroneMask();
+
+	// Le os pixels da mascara de volta da GPU e acha o retangulo (em
+	// pixels) que envolve todos os pixels que batem com MaskPixelThreshold.
+	bool ComputeMaskBbox(UTextureRenderTarget2D* MaskTarget, FVector2D& OutMin, FVector2D& OutMax) const;
+
 	EPoseCheckStatus BboxQualityReason(const FVector2D& Min, const FVector2D& Max, int32 Width, int32 Height) const;
-	FPoseCheckResult CheckPose(AActor* CamActor, USceneCaptureComponent2D* RgbComp) const;
+
+	// Substitui a antiga checagem geometrica (raycast + projecao de
+	// cantos) -- captura a mascara, le os pixels, e decide oclusao/bbox a
+	// partir do que realmente apareceu na imagem.
+	FPoseCheckResult CheckPoseFromMask(USceneCaptureComponent2D* MaskComp) const;
+
+	// Salva a imagem crua da mascara pra conferencia visual (bSaveMaskDebug).
+	void ExportMaskDebug(USceneCaptureComponent2D* MaskComp, const FString& CamLabel, const FString& SampleKey) const;
 
 	void ExportSample(const FString& CamLabel, const FString& SampleKey, USceneCaptureComponent2D* RgbComp, const FVector2D& BboxMin, const FVector2D& BboxMax, int32 RtWidth, int32 RtHeight, int32 SupersampleFactor) const;
 

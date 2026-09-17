@@ -3,6 +3,9 @@
 #include "Components/SceneCaptureComponent2D.h"
 #include "Engine/TextureRenderTarget2D.h"
 #include "Engine/PostProcessVolume.h"
+#include "Engine/Scene.h"
+#include "Materials/MaterialInterface.h"
+#include "UObject/ConstructorHelpers.h"
 #include "EngineUtils.h"
 
 ADroneCaptureCamera::ADroneCaptureCamera()
@@ -13,6 +16,24 @@ ADroneCaptureCamera::ADroneCaptureCamera()
 		Comp->bCaptureEveryFrame = false;
 		Comp->bCaptureOnMovement = false;
 	}
+
+	// Segunda captura so pra mascara de segmentacao do drone -- usa o
+	// material de "Buffer Visualization" do proprio Engine (CustomStencil),
+	// nao precisa criar asset novo nenhum. A cena inteira continua sendo
+	// desenhada normalmente nessa passada (oclusao de verdade funciona
+	// igual a RGB) -- so a cor final e substituida por essa visualizacao.
+	MaskCaptureComponent = CreateDefaultSubobject<USceneCaptureComponent2D>(TEXT("MaskCaptureComponent"));
+	MaskCaptureComponent->SetupAttachment(RootComponent);
+	MaskCaptureComponent->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;
+	MaskCaptureComponent->bCaptureEveryFrame = false;
+	MaskCaptureComponent->bCaptureOnMovement = false;
+
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> MaskMaterialFinder(TEXT("/Engine/BufferVisualization/CustomStencil.CustomStencil"));
+	if (MaskMaterialFinder.Succeeded())
+	{
+		MaskCaptureComponent->PostProcessSettings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, MaskMaterialFinder.Object));
+	}
+	MaskCaptureComponent->PostProcessBlendWeight = 1.0f;
 }
 
 void ADroneCaptureCamera::BeginPlay()
@@ -50,6 +71,20 @@ void ADroneCaptureCamera::CreateRenderTarget()
 	Comp->TextureTarget = RT;
 	Comp->bIgnoreScreenPercentage = true;
 	Comp->bAlwaysPersistRenderingState = true;
+
+	if (MaskCaptureComponent)
+	{
+		UTextureRenderTarget2D* MaskRT = NewObject<UTextureRenderTarget2D>(this);
+		MaskRT->RenderTargetFormat = RTF_RGBA8;
+		MaskRT->ClearColor = FLinearColor::Black;
+		MaskRT->bAutoGenerateMips = false;
+		MaskRT->InitAutoFormat(RtWidth, RtHeight); // sem supersample -- mascara nao precisa de AA extra
+		MaskRT->UpdateResourceImmediate(true);
+
+		MaskCaptureComponent->TextureTarget = MaskRT;
+		MaskCaptureComponent->bIgnoreScreenPercentage = true;
+		MaskCaptureComponent->bAlwaysPersistRenderingState = true;
+	}
 }
 
 void ADroneCaptureCamera::ConfigurePostProcess()
