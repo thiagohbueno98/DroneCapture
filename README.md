@@ -24,6 +24,8 @@ Fazer essa máscara respeitar oclusão de verdade (se tem uma parede na frente d
 
 Renderizar em tempo real deixa um pouco de granulado na imagem, principalmente em bordas e reflexos. Para reduzir isso, cada foto é tirada numa resolução maior do que o tamanho final e depois reduzida fazendo a média dos pixels vizinhos, a mesma técnica usada em anti-aliasing de jogos. O resultado é uma imagem final mais limpa, sem custo perceptível de qualidade.
 
+![Comparação entre o pipeline anterior deste projeto e o atual, mesma cena](Docs/comparacao_resolucao.jpg)
+
 ### Hélice borrada de verdade
 
 Uma hélice girando rápido sai borrada numa foto real, porque o obturador da câmera captura o movimento durante a exposição. A Unreal tem um efeito de motion blur pronto, mas ele não funciona no tipo de câmera usada aqui (é uma limitação da engine, confirmada testando). A solução foi simular esse borrão na mão: tirar várias fotos da hélice em ângulos levemente diferentes, um instante depois do outro, e fazer a média delas.
@@ -31,6 +33,8 @@ Uma hélice girando rápido sai borrada numa foto real, porque o obturador da c�
 ### Fotos sem nenhum drone
 
 Um detector de verdade também precisa aprender a não enxergar drone onde não tem nenhum. Por isso o dataset inclui, de propósito, algumas fotos sem drone (rotuladas como negativas) e fotos onde o drone aparece cortado na borda ou quase todo escondido, já que isso acontece o tempo todo numa detecção em tempo real.
+
+![Foto sem nenhum drone, rotulada como amostra negativa](Docs/exemplo_negativo.jpg)
 
 ![Quatro exemplos do dataset gerado, mesma cena com o drone em posições diferentes](Docs/exemplos_dataset.jpg)
 
