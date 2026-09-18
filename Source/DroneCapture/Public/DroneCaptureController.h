@@ -154,17 +154,28 @@ public:
 
 	// ------------------------------------------------------------------
 	// Mascara de segmentacao -- oclusao e bbox saem dos PIXELS DE VERDADE
-	// de uma segunda captura onde so o drone aparece (branco, via
-	// CustomStencil + material de Buffer Visualization nativo do Engine),
-	// em vez de aproximar por raycast+projecao geometrica. A cena inteira
-	// continua sendo desenhada normalmente nessa passada -- objetos na
-	// frente do drone bloqueiam ele igual na imagem RGB de verdade, sem
-	// depender da qualidade da malha de colisao do mapa (achado
-	// 2026-09-17: colisao simplificada de mapas grandes tipo o CitySample
-	// deixava o raycast antigo passar por baixo de beirais/telhados sem
-	// colisao complexa, gerando bbox falso-positiva). Tambem elimina a
-	// bbox inflada em yaws diagonais do AABB do ator antigo -- a bbox
-	// agora e sempre exatamente do tamanho da silhueta visivel.
+	// de uma segunda captura onde so o drone aparece (branco), em vez de
+	// aproximar por raycast+projecao geometrica (achado 2026-09-17: colisao
+	// simplificada de mapas grandes tipo o CitySample deixava o raycast
+	// antigo passar por baixo de beirais/telhados sem colisao complexa,
+	// gerando bbox falso-positiva). Tambem elimina a bbox inflada em yaws
+	// diagonais do AABB do ator antigo -- a bbox agora e sempre exatamente
+	// do tamanho da silhueta visivel.
+	//
+	// IMPORTANTE: CustomStencil sozinho (so no drone) NAO respeita oclusao
+	// de objetos comuns da cena -- CustomDepth e um buffer separado do
+	// buffer normal, so objetos TAMBEM marcados participam do Z-test dele.
+	// O material M_DroneMask por isso compara SceneTexture(CustomDepth) do
+	// drone contra SceneTexture(SceneDepth) da cena inteira (que reflete
+	// QUALQUER objeto opaco comum) -- so conta como "drone visivel" quando
+	// o stencil bate E o CustomDepth nao esta atras do que o SceneDepth
+	// enxerga como mais proximo naquele pixel. Tentativa alternativa de
+	// marcar TODO O RESTO da cena com CustomDepth tambem (evitando essa
+	// comparacao entre 2 buffers) foi abandonada: quebra em niveis
+	// Nanite-pesados como o CityPark/CitySample (malhas Nanite forcam
+	// fallback pra renderizacao nao-Nanite quando marcadas CustomDepth em
+	// massa, mesmo com r.Nanite.CustomDepth=1 -- 0 amostras validas na
+	// captura de teste). Ver contexto.md.
 	// ------------------------------------------------------------------
 
 	// Valor de CustomDepth Stencil (0-255) usado SO nos componentes do

@@ -627,6 +627,21 @@ void ADroneCaptureController::ConfigureDroneMask()
 
 	// TODOS os componentes visuais do drone (nao so os com colisao -- aqui
 	// queremos a silhueta VISIVEL de verdade, colisao nao importa mais).
+	//
+	// Tentativa abandonada (2026-09-17): marcar TODO O RESTO DA CENA com
+	// CustomDepth tambem (pra deixar o teste de profundidade do drone
+	// contra oclusores usar o Z-test interno do proprio CustomDepth, sem
+	// comparar 2 buffers diferentes) -- funcionava em teoria, mas quebrou a
+	// captura de verdade no CityPark (0 amostras salvas, mascara saindo
+	// toda branca). Causa: malhas Nanite (a maior parte do nivel) forcam um
+	// fallback pra renderizacao NAO-Nanite quando marcadas CustomDepth em
+	// massa (confirmado pelo aviso "[VSM] Sobrecarga da fila de marcacao
+	// que nao sao do Nanite" no log), mesmo com r.Nanite.CustomDepth=1 (ja
+	// vem ligado por padrao no motor -- nao era isso). Nao escala pra
+	// niveis grandes/Nanite-pesados. Voltado pra so marcar o drone, com
+	// oclusao resolvida via comparacao de profundidade em CheckPoseFromMask
+	// (ver DisableTemporalJitterForMask -- desligar TAA/TSR na captura da
+	// mascara elimina o ruido que motivou a tentativa de marcar tudo).
 	for (UActorComponent* ActorComp : Drone->GetComponents())
 	{
 		if (UPrimitiveComponent* Prim = Cast<UPrimitiveComponent>(ActorComp))

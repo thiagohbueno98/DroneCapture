@@ -70,6 +70,19 @@ ADroneCaptureCamera::ADroneCaptureCamera()
 	}
 	MaskCaptureComponent->PostProcessBlendWeight = 1.0f;
 
+	// Desliga TAA/TSR SO nesta captura -- a mascara e 1 frame estatico
+	// (nao precisa de acumulo temporal, ao contrario da captura RGB que
+	// espera WarmupCaptures frames de Lumen/SSR convergindo). Achado
+	// rodando o dataset de verdade: com TAA/TSR ligado, CustomDepth e
+	// SceneDepth (usados na comparacao de oclusao do material, ver
+	// M_DroneMask) sao amostrados com jitter sub-pixel LEVEMENTE diferente
+	// entre os 2 buffers (renderizados em passadas distintas), gerando
+	// ruido "pontilhado" na propria silhueta do drone mesmo sem oclusao
+	// real -- e um dos fatores que tambem contribuia pro falso-positivo de
+	// oclusao perto da agua da fonte (ver contexto.md).
+	MaskCaptureComponent->ShowFlags.SetTemporalAA(false);
+	MaskCaptureComponent->ShowFlags.SetAntiAliasing(false);
+
 	// NAO forcar AEM_Manual aqui -- achado rodando de verdade (testes via
 	// Python Editor Scripting, ver contexto.md): exposicao manual sem
 	// TAMBEM configurar abertura/ISO/shutter deixa a cena escura demais e
