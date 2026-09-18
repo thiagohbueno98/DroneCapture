@@ -61,10 +61,10 @@ Não precisa rodar nenhum script, só arrastar 4 atores para dentro do nível:
 
 | Ator | Quantos | Para que serve |
 |---|---|---|
-| Drone alvo | 1 | O drone em si. Dá para escolher entre 6 modelos prontos, ou usar uma malha própria. |
-| Câmera de captura | 1 ou mais | Cada uma é um ponto de vista diferente. A resolução final das fotos é configurada aqui. |
-| Volume do grid | 1 | Uma caixa invisível que marca a região onde o drone pode aparecer. |
-| Controlador | 1 | Comanda a captura inteira, do início ao fim. |
+| `DroneCaptureTarget` | 1 | O drone em si. Dá para escolher entre 6 modelos prontos, ou usar uma malha própria. |
+| `DroneCaptureCamera` | 1 ou mais | Cada uma é um ponto de vista diferente. A resolução final das fotos é configurada aqui. |
+| `DroneCaptureGridVolume` | 1 | Uma caixa invisível que marca a região onde o drone pode aparecer. |
+| `DroneCaptureController` | 1 | Comanda a captura inteira, do início ao fim. |
 
 O plugin encontra esses atores sozinho ao apertar Play. Só é preciso apontar as referências na mão se você estiver usando classes próprias no lugar das do plugin.
 
