@@ -25,6 +25,7 @@ enum class EPoseCheckStatus : uint8
 	ForaDoCampoDeVisao = 2,
 	BboxPequena = 3,
 	BboxNaBorda = 4,
+	BboxMuitoGrande = 5,
 };
 
 // EPropellerSpinAxis agora mora em DroneCaptureTarget.h (e por-modelo, nao
@@ -130,6 +131,19 @@ public:
 	// que so precisa de drone inteiro em quadro).
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Qualidade")
 	float EdgeMarginFraction = 0.0f;
+
+	// Descarta a pose se a bbox da mascara cobrir mais que essa fracao da
+	// area total da imagem. Nao e um limite realista pro drone (que nunca
+	// enche o quadro inteiro nas distancias usadas aqui) -- e uma trava de
+	// seguranca contra o material M_DroneMask cair no fallback (mostra a
+	// cena RGB inteira em vez de preto/branco) num frame isolado, o que faz
+	// ComputeMaskBbox enxergar "drone" em toda a imagem. Achado rodando o
+	// dataset de verdade pela 1a vez: pose_index=0 saiu com bbox=imagem
+	// inteira porque o shader do material ainda estava compilando na
+	// PRIMEIRA CaptureScene() da mascara (ver aquecimento em
+	// ResolveSceneReferences() e contexto.md).
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Qualidade")
+	float MaxBboxAreaFraction = 0.9f;
 
 	// ------------------------------------------------------------------
 	// Mascara de segmentacao -- oclusao e bbox saem dos PIXELS DE VERDADE

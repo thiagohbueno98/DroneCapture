@@ -232,7 +232,18 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 			}
 		}
 		WarmupFramesLeft--;
-		return;
+		if (WarmupFramesLeft > 0)
+		{
+			return;
+		}
+		// WarmupFramesLeft chegou a 0 -- cai direto pra Fase 3 aqui embaixo,
+		// no MESMO Tick, em vez de retornar e deixar a Fase 3 rodar so no
+		// Tick seguinte. Achado rodando o dataset de verdade: SpinPropellers()
+		// roda no TOPO de todo Tick (antes deste if), entao esperar mais um
+		// Tick antes de capturar a mascara deixava a helice girar um pouco
+		// mais entre o ultimo frame RGB (capturado acima) e a mascara -- a
+		// ponta da pa aparecia visivelmente fora da bbox calculada a partir
+		// da mascara (mascara e RGB nao eram mais do mesmo instante).
 	}
 
 	// Fase 3 (WarmupFramesLeft == 0): aquecimento da imagem RGB concluido --
@@ -480,6 +491,26 @@ void ADroneCaptureController::ResolveSceneReferences()
 
 	ConfigureDroneMask();
 
+	// Aquecimento do shader do M_DroneMask -- achado rodando o dataset de
+	// verdade pela primeira vez: a PRIMEIRA CaptureScene() de cada
+	// MaskComponent, logo no inicio do Play, pode cair num frame onde o
+	// shader do material de post-process ainda esta compilando (PSO/shader
+	// assincrono), renderizando a cena RGB normal em vez da mascara preto/
+	// branco -- ComputeMaskBbox entao interpreta a cena inteira como "drone"
+	// e salva bbox=imagem inteira (visto em CaptureCam1_0, pose_index=0, a
+	// unica amostra corrompida em 525). Capturas descartadas aqui (antes do
+	// loop de poses comecar) forcam essa compilacao a acontecer fora da
+	// amostra de verdade.
+	for (AActor* CamActor : Cameras)
+	{
+		const ADroneCaptureCamera* CamCapture = Cast<ADroneCaptureCamera>(CamActor);
+		if (USceneCaptureComponent2D* MaskComp = CamCapture ? CamCapture->GetMaskCaptureComponent() : nullptr)
+		{
+			MaskComp->CaptureScene();
+			MaskComp->CaptureScene();
+		}
+	}
+
 	if (!Drone)
 	{
 		UE_LOG(LogTemp, Error, TEXT("[DroneCapture] Drone nao encontrado (referencia vazia e nenhum ator com tag 'DroneAlvo')."));
@@ -665,6 +696,11 @@ EPoseCheckStatus ADroneCaptureController::BboxQualityReason(const FVector2D& Min
 	if (Area < (float)MinBboxAreaPx)
 	{
 		return EPoseCheckStatus::BboxPequena;
+	}
+
+	if (Area > (float)(Width * Height) * MaxBboxAreaFraction)
+	{
+		return EPoseCheckStatus::BboxMuitoGrande;
 	}
 
 	const float MarginX = Width * EdgeMarginFraction;
@@ -892,6 +928,7 @@ FString ADroneCaptureController::StatusToReasonString(EPoseCheckStatus Status)
 	case EPoseCheckStatus::ForaDoCampoDeVisao: return TEXT("fora_do_campo_de_visao");
 	case EPoseCheckStatus::BboxPequena: return TEXT("bbox_pequena");
 	case EPoseCheckStatus::BboxNaBorda: return TEXT("bbox_na_borda");
+	case EPoseCheckStatus::BboxMuitoGrande: return TEXT("bbox_muito_grande");
 	default: return TEXT("ok");
 	}
 }
