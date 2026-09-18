@@ -170,6 +170,21 @@ void UDroneCaptureSetupWidget::NativeOnInitialized()
 	UHorizontalBoxSlot* YawSamplesSlot = YawRow->AddChildToHorizontalBox(YawSamplesBox);
 	YawSamplesSlot->SetSize(ESlateSizeRule::Fill);
 
+	// So usado se "Yaw aleatorio" acima estiver DESMARCADO -- varre TODOS
+	// esses angulos (graus) em CADA posicao do grid, em vez de sortear.
+	AddLabel(TEXT("Angulos manuais (graus, separados por virgula) -- so se \"Yaw aleatorio\" acima estiver desmarcado"));
+	FString DefaultYawAnglesText = TEXT("0");
+	if (Controller && Controller->YawAnglesDeg.Num() > 0)
+	{
+		TArray<FString> Parts;
+		for (float Angle : Controller->YawAnglesDeg)
+		{
+			Parts.Add(FString::SanitizeFloat(Angle));
+		}
+		DefaultYawAnglesText = FString::Join(Parts, TEXT(", "));
+	}
+	ManualYawAnglesBox = AddEditBox(DefaultYawAnglesText);
+
 	AddLabel(TEXT("Horario do dia"));
 	SunComboBox = WidgetTree->ConstructWidget<UComboBoxString>(UComboBoxString::StaticClass());
 	SunComboBox->AddOption(TEXT("Sol baixo (amanhecer/entardecer)"));
@@ -255,6 +270,24 @@ void UDroneCaptureSetupWidget::OnStartClicked()
 		if (YawSamplesBox)
 		{
 			Controller->YawSamplesPerPoint = FMath::Max(1, FCString::Atoi(*YawSamplesBox->GetText().ToString()));
+		}
+		if (ManualYawAnglesBox)
+		{
+			TArray<FString> Parts;
+			ManualYawAnglesBox->GetText().ToString().ParseIntoArray(Parts, TEXT(","), true);
+			TArray<float> ParsedAngles;
+			for (FString& Part : Parts)
+			{
+				Part.TrimStartAndEndInline();
+				if (!Part.IsEmpty())
+				{
+					ParsedAngles.Add(FCString::Atof(*Part));
+				}
+			}
+			if (ParsedAngles.Num() > 0)
+			{
+				Controller->YawAnglesDeg = ParsedAngles;
+			}
 		}
 
 		const int32 SunIndex = SunComboBox ? SunComboBox->GetSelectedIndex() : 2;

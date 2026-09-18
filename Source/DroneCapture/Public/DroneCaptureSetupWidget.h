@@ -65,6 +65,12 @@ private:
 	UPROPERTY()
 	UEditableTextBox* YawSamplesBox = nullptr;
 
+	// So usado quando RandomYawCheckBox esta DESMARCADO -- lista de angulos
+	// (graus, separados por virgula) varrida em CADA posicao do grid (ver
+	// ADroneCaptureController::YawAnglesDeg).
+	UPROPERTY()
+	UEditableTextBox* ManualYawAnglesBox = nullptr;
+
 	UFUNCTION()
 	void OnStartClicked();
 

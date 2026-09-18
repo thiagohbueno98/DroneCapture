@@ -80,17 +80,18 @@ public:
 	// Configuracao do grid / captura (equivalente a capture_core.py)
 	// ------------------------------------------------------------------
 
-	// Usados so se bRandomYaw = false (varre TODOS esses angulos em CADA
-	// posicao do grid).
-	UPROPERTY(EditAnywhere, Category = "Drone Capture|Grid")
-	TArray<float> YawAnglesDeg = { 0.f, 90.f, 180.f, 270.f };
+	// Usados so se bRandomYaw = false (modo "manual" -- varre TODOS esses
+	// angulos em CADA posicao do grid). Default com 1 angulo so -- o modo
+	// manual e pra quem quer escolher angulos especificos (editavel no menu
+	// de setup, ver DroneCaptureSetupWidget), nao um sweep pre-definido.
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Grid", meta = (EditCondition = "!bRandomYaw"))
+	TArray<float> YawAnglesDeg = { 0.f };
 
-	// Se ligado, ignora YawAnglesDeg -- sorteia YawSamplesPerPoint angulos
-	// aleatorios (0-360) por posicao, em vez de varrer uma lista fixa. Usar
-	// YawSamplesPerPoint=1 pra so 1 pose por posicao (bem mais rapido que
-	// os 4 angulos fixos de antes).
+	// Se ligado (DEFAULT), ignora YawAnglesDeg -- sorteia YawSamplesPerPoint
+	// angulos aleatorios (0-360) por posicao, em vez de varrer uma lista
+	// fixa manual. Usar YawSamplesPerPoint=1 pra so 1 pose por posicao.
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Grid")
-	bool bRandomYaw = false;
+	bool bRandomYaw = true;
 
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Grid", meta = (EditCondition = "bRandomYaw", ClampMin = "1"))
 	int32 YawSamplesPerPoint = 1;
@@ -266,7 +267,7 @@ public:
 	bool bSpinPropellers = true;
 
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Helices")
-	float PropellerSpinDegPerSec = 720.0f;
+	float PropellerSpinDegPerSec = 1440.0f;
 
 	// Casamento por NOME do componente (substring, case-insensitive) OU
 	// pelo nome da malha estatica -- mesmo criterio duplo do
