@@ -1,134 +1,93 @@
 # DroneCapture
 
-Plugin C++ para Unreal Engine 5.5 que gera um **dataset sintético de imagens
-de drone** (visto por câmeras fixas espalhadas pelo mapa), pronto no formato
-YOLO. Feito para um Trabalho de Graduação (detecção de drones), mas serve
-pra qualquer projeto que precise de captura sintética automatizada:
-posiciona um drone num grid 3D, checa oclusão/enquadramento em cada câmera,
-calcula a bounding box e exporta imagem + label.
+Plugin para Unreal Engine 5.5 que gera fotos sintéticas de um drone voando por um mapa, já anotadas no formato que redes de detecção de objetos (YOLO) entendem. Foi feito para um Trabalho de Graduação sobre detecção de drones, mas serve para qualquer projeto que precise desse tipo de dataset.
 
-Roda inteiramente em **Play mode** (não em Editor Scripting) — isso evita
-um vazamento de memória conhecido do `SceneCaptureComponent2D::CaptureScene()`
-quando chamado fora do Play.
+A ideia é simples: você posiciona algumas câmeras e um volume 3D no mapa, aperta Play, e o plugin move um drone dentro desse volume, tira fotos de cada câmera, descobre onde o drone está em cada imagem e salva tudo pronto para treinar um modelo.
+
+## O que ele resolve
+
+Gerar esse tipo de dataset na mão (fotografar um drone de verdade em centenas de posições e ângulos, depois desenhar a caixa em cada foto) leva muito tempo. O plugin faz isso dentro da Unreal, e alguns dos problemas que apareceram no caminho valem explicar.
+
+### Saber onde o drone realmente está
+
+A parte mais delicada é descobrir onde desenhar a caixa ao redor do drone quando ele está de lado, meio escondido atrás de um poste ou quase saindo do quadro.
+
+A primeira tentativa calculava a caixa a partir da geometria 3D: pegava os cantos do drone e projetava na tela. Funcionava a maior parte do tempo, mas errava justamente nos casos mais realistas, quando alguma coisa bloqueava parte do drone sem que o cálculo soubesse, ou quando o ângulo da câmera fazia a caixa sair bem maior que o drone visível de fato.
+
+A solução que ficou foi outra: em vez de calcular, o plugin captura duas fotos de cada câmera no mesmo instante. Uma é a foto normal. A outra mostra só o drone, em branco sólido, com o resto da cena em preto (essa técnica é chamada de máscara de segmentação). A caixa sai direto dos pixels brancos dessa segunda foto, então ela sempre bate com o que realmente aparece na imagem, e cortes por bordas ou objetos na frente do drone ficam certos automaticamente.
+
+![Foto capturada ao lado da máscara que mostra só o drone](Docs/mascara_exemplo.jpg)
+
+Fazer essa máscara respeitar oclusão de verdade (se tem uma parede na frente do drone, ele precisa mesmo sumir da máscara) deu mais trabalho do que parecia. A engine tem um jeito nativo de marcar um objeto para aparecer sozinho numa passada de renderização separada, mas por padrão esse marcador ignora tudo que não está marcado do mesmo jeito, então o drone continuava aparecendo atrás de paredes e cercas comuns. A correção compara a distância da câmera até o drone com a distância até qualquer outra coisa na frente dele, e só desenha o drone quando ele é realmente o objeto mais próximo naquele ponto da imagem.
+
+### Fotos com menos ruído
+
+Renderizar em tempo real deixa um pouco de granulado na imagem, principalmente em bordas e reflexos. Para reduzir isso, cada foto é tirada numa resolução maior do que o tamanho final e depois reduzida fazendo a média dos pixels vizinhos, a mesma técnica usada em anti-aliasing de jogos. O resultado é uma imagem final mais limpa, sem custo perceptível de qualidade.
+
+### Hélice borrada de verdade
+
+Uma hélice girando rápido sai borrada numa foto real, porque o obturador da câmera captura o movimento durante a exposição. A Unreal tem um efeito de motion blur pronto, mas ele não funciona no tipo de câmera usada aqui (é uma limitação da engine, confirmada testando). A solução foi simular esse borrão na mão: tirar várias fotos da hélice em ângulos levemente diferentes, um instante depois do outro, e fazer a média delas.
+
+### Fotos sem nenhum drone
+
+Um detector de verdade também precisa aprender a não enxergar drone onde não tem nenhum. Por isso o dataset inclui, de propósito, algumas fotos sem drone (rotuladas como negativas) e fotos onde o drone aparece cortado na borda ou quase todo escondido, já que isso acontece o tempo todo numa detecção em tempo real.
+
+![Quatro exemplos do dataset gerado, mesma cena com o drone em posições diferentes](Docs/exemplos_dataset.jpg)
 
 ## Requisitos
 
-- Unreal Engine **5.5**
-- Visual Studio 2022 com o workload "Desenvolvimento para desktop com C++"
-  (só é necessário se você for compilar o plugin — ver "Instalação")
+- Unreal Engine 5.5
+- Visual Studio 2022 com o componente de desenvolvimento em C++ (só necessário se você for compilar o plugin)
 
-## Instalação
+## Instalando
 
-1. Copie a pasta `DroneCapture/` inteira para dentro de `<SeuProjeto>/Plugins/`.
-2. Abra o projeto no Editor (ou compile direto via linha de comando, ver
-   abaixo) — o plugin já vem habilitado (`CanContainContent: true`), não
-   precisa mexer em `.uplugin` nem em Content Browser.
-3. Se o Editor pedir pra compilar módulos ausentes, aceite. Alternativa via
-   linha de comando (mais confiável, principalmente se o Editor já estiver
-   aberto com o DLL antigo travado):
+1. Copie a pasta `DroneCapture` inteira para dentro de `<SeuProjeto>/Plugins/`.
+2. Abra o projeto no Editor. O plugin já vem pronto para usar, não precisa mexer em nenhuma configuração.
+3. Se o Editor perguntar se quer compilar módulos que faltam, aceite. Se preferir compilar por fora do Editor (mais confiável, principalmente se o Editor já estiver aberto):
 
    ```
    <caminho-do-Engine>\Engine\Build\BatchFiles\Build.bat UnrealEditor Win64 Development -Project=<caminho>\<SeuProjeto>.uproject
    ```
 
-   Compile com o Editor **fechado**. Mudanças em **construtores** (ex:
-   trocar o `ConstructorHelpers::FObjectFinder` de uma malha default) não
-   são pegas pelo Live Coding — precisam dessa recompilação completa pra
-   valer.
+   Faça isso com o Editor fechado.
 
 ## Montando a cena
 
-Sem rodar nenhum script Python — só arrastar 4 tipos de ator no nível e
-preencher o Details panel:
+Não precisa rodar nenhum script, só arrastar 4 atores para dentro do nível:
 
-| Ator | Quantidade | O que configurar |
+| Ator | Quantos | Para que serve |
 |---|---|---|
-| `ADroneCaptureTarget` | 1 | `DroneModel` (dropdown: DJI Pro Mini, DJI 350RTK, DJI Neo, DJI Phantom, DJI Tello, AirSim Default, ou `Custom` pra usar `BodyMesh`/`PropellerMesh` próprios) |
-| `ADroneCaptureCamera` | N (uma por ponto de vista) | `CameraIndex` (1, 2, 3...), `RtWidth`/`RtHeight` (resolução final do dataset), `SupersampleFactor` (ver abaixo) |
-| `ADroneCaptureGridVolume` | 1 | Escale a `Bounds` (BoxComponent) pra cobrir a região 3D onde o drone deve aparecer |
-| `ADroneCaptureController` | 1 | Orquestra tudo — ver campos principais abaixo |
+| Drone alvo | 1 | O drone em si. Dá para escolher entre 6 modelos prontos, ou usar uma malha própria. |
+| Câmera de captura | 1 ou mais | Cada uma é um ponto de vista diferente. A resolução final das fotos é configurada aqui. |
+| Volume do grid | 1 | Uma caixa invisível que marca a região onde o drone pode aparecer. |
+| Controlador | 1 | Comanda a captura inteira, do início ao fim. |
 
-A descoberta de cena é automática (por classe); só é preciso preencher os
-campos `Drone`/`Cameras`/`GridVolume` do Controller manualmente se você
-tiver atores customizados fora dessas classes (nesse caso, use Actor Tags:
-`"DroneAlvo"`, `"CaptureCam"`, `"VolumeGrid"`).
-
-### Campos principais do `ADroneCaptureController`
-
-- **Grid**: `GridStepXM/YM/ZM` (passo em metros por eixo), `bRandomYaw` +
-  `YawSamplesPerPoint` (sorteia N ângulos por posição em vez de varrer uma
-  lista fixa) ou `YawAnglesDeg` (lista fixa, usada se `bRandomYaw = false`).
-- **Captura**: `WarmupCaptures` (frames reais de espera por pose antes de
-  exportar — necessário pra Lumen/SSR/reflexos convergirem; aumente se
-  reflexos de água/vidro ainda saírem "crus").
-- **Qualidade**: `MinBboxAreaPx`, `EdgeMarginFraction`, `MinVisibleFraction`
-  (fração mínima dos 8 cantos do drone que precisa estar desobstruída pra
-  aceitar a amostra — bbox é sempre amodal, i.e. cobre a extensão total
-  mesmo com oclusão parcial).
-- **Saída**: `OutputDir` + `DatasetName` (caminho final =
-  `OutputDir/DatasetName`), `Split` (`train`/`val`/...).
-- **Debug**: `bSaveDiscardDebug` salva até `DiscardDebugLimitPerReason`
-  imagens por motivo de descarte em `debug_descartados/<motivo>/`.
-- **Hélices**: `bSpinPropellers`, `PropellerSpinDegPerSec` — giram
-  nativamente durante o Play (Yaw é o eixo correto pros 6 modelos
-  bundlados; hélices diagonais opostas giram no mesmo sentido, as do
-  mesmo lado em sentidos opostos, como um quadricóptero real).
-- **Menu**: `bShowSetupMenuOnBeginPlay` (default `true`) mostra um menu ao
-  apertar Play; desligue pra pular direto pro fluxo antigo
-  (`bAutoStartOnBeginPlay`), útil em automação/teste via script.
-
-### Supersampling (anti-aliasing / redução de ruído)
-
-Cada `ADroneCaptureCamera` tem um campo `SupersampleFactor` (padrão `2`,
-1–4). A câmera renderiza numa resolução `Factor` vezes maior que
-`RtWidth`/`RtHeight`, e o Controller reduz pra resolução final fazendo uma
-média real dos pixels em espaço linear (box filter) antes de salvar o PNG
-— mesma ideia de Super-Sampling Anti-Aliasing (SSAA), deixa a imagem bem
-mais "limpa"/natural que exportar direto na resolução final. `Factor = 1`
-desliga (comportamento antigo, sem custo extra). Fator maior = captura
-mais lenta (há um readback de GPU por imagem exportada).
+O plugin encontra esses atores sozinho ao apertar Play. Só é preciso apontar as referências na mão se você estiver usando classes próprias no lugar das do plugin.
 
 ## Rodando
 
-Aperte **Play**. Com o menu de setup ligado (padrão), aparece um formulário
-pedindo: modelo de drone, pasta/nome do dataset, passo do grid (X/Y/Z), yaw
-aleatório (liga/desliga + quantos ângulos por posição), e horário do dia
-(3 presets de ângulo de sol). Clique **Iniciar Captura**.
+Aperte **Play**. Vai aparecer um menu para configurar a captura: modelo de drone, onde salvar o dataset, o passo do grid, os ângulos em que o drone deve ser fotografado em cada posição, e o horário do dia. Clique em **Iniciar Captura** e acompanhe o progresso pelo Output Log.
 
-A captura roda 1 pose por Tick real (grid inteiro × yaws × câmeras) —
-acompanhe o progresso pelo Output Log. Pra parar antes do fim, chame
-`StopCapture()` (BlueprintCallable, também exposto via Details/console).
+### Ângulos do drone
 
-## Formato de saída
+Em cada posição do grid, o drone pode ser fotografado em um ou mais ângulos. O menu oferece duas opções:
+
+- **Aleatório**: sorteia quantos ângulos você pedir, um valor diferente a cada posição.
+- **Manual**: você digita os ângulos exatos, em graus e separados por vírgula, usados em toda posição do grid.
+
+## O que sai no final
 
 ```
-<OutputDir>/<DatasetName>/
-├── images/<Split>/CaptureCamN_<pose_index>.png
-├── labels/<Split>/CaptureCamN_<pose_index>.txt   # formato YOLO: "0 xc yc w h" (normalizado 0-1)
-├── data.yaml                                      # escrito ao final da rodada
-└── debug_descartados/<motivo>/...                 # só se bSaveDiscardDebug = true
+<pasta escolhida>/<nome do dataset>/
+├── images/train/...     as fotos
+├── labels/train/...     uma caixa por linha, formato YOLO
+└── data.yaml
 ```
 
-## Estrutura do plugin
+## Sobre as malhas de drone
 
-- `ADroneCaptureController` — orquestra a rodada inteira (grid, oclusão,
-  bbox, export, giro de hélice, menu de setup). Ponto de entrada de tudo.
-- `ADroneCaptureTarget` — o drone (corpo + 4 hélices), com 6 modelos
-  bundlados em `Content/Meshes/` (malha + materiais + texturas próprios,
-  sem depender de nenhum asset fora do plugin).
-- `ADroneCaptureCamera` — câmera de captura pronta pra uso (cria o próprio
-  Render Target em runtime, já com Lumen/exposição/pós-processo
-  configurados).
-- `ADroneCaptureGridVolume` — só marca a região 3D do grid (BoxComponent
-  invisível, sem lógica própria).
-- `UDroneCaptureSetupWidget` — menu de configuração mostrado ao apertar
-  Play (UMG montado 100% em C++, sem Widget Blueprint).
+Os modelos de drone que vêm com o plugin foram reaproveitados de pacotes de terceiros (AirSim, SimBlank). Confira a licença original de cada um antes de usar em algo comercial.
 
-## Avisos
+## Limitações conhecidas
 
-- **Malhas de drone bundladas** (`Content/Meshes/`) vieram de asset packs
-  de terceiros (AirSim/SimBlank) reempacotados pra dentro do plugin —
-  confira a licença original de cada asset antes de redistribuir/usar
-  comercialmente.
-- Testado apenas em Windows com UE 5.5. Não testado em builds
-  packaged/standalone (só Editor + Play-in-Editor).
+Testado só no Windows, com Unreal 5.5, rodando dentro do Editor em modo Play. Não foi testado num jogo empacotado (standalone).
