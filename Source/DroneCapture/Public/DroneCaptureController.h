@@ -116,8 +116,15 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Captura")
 	int32 WarmupCaptures = 5;
 
+	// Numero MINIMO de pixels da mascara que realmente pertencem ao drone
+	// (contagem de pixel de verdade, nao a area do retangulo da bbox).
+	// Achado rodando o dataset de verdade: um drone quase todo ocluido, com
+	// so a ponta de 1-2 helices espiando por tras de um obstaculo em cantos
+	// bem separados, gera uma bbox (retangulo que envolve os 2 fragmentos)
+	// com area consideravel mesmo tendo pouquissimo drone de fato visivel --
+	// medir pixel real em vez da area do retangulo pega esse caso.
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Qualidade")
-	int32 MinBboxAreaPx = 200;
+	int32 MinDronePixelCount = 200;
 
 	// Margem (fracao da largura/altura) que a bbox precisa manter em relacao
 	// a borda da imagem pra NAO ser descartada. Default 0 -- desligado de
@@ -126,8 +133,8 @@ public:
 	// precisa aparecer no dataset, nao um erro. A bbox ja vem dos pixels
 	// reais da mascara (sempre dentro dos limites da imagem por construcao)
 	// -- com margem 0 essa checagem nunca dispara, entao toda pose com pelo
-	// menos MinBboxAreaPx de drone visivel na tela passa. Aumente pra um
-	// valor > 0 se quiser voltar a descartar poses cortadas (ex: dataset
+	// menos MinDronePixelCount de drone visivel na tela passa. Aumente pra
+	// um valor > 0 se quiser voltar a descartar poses cortadas (ex: dataset
 	// que so precisa de drone inteiro em quadro).
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Qualidade")
 	float EdgeMarginFraction = 0.0f;
@@ -334,10 +341,12 @@ private:
 	void ConfigureDroneMask();
 
 	// Le os pixels da mascara de volta da GPU e acha o retangulo (em
-	// pixels) que envolve todos os pixels que batem com MaskPixelThreshold.
-	bool ComputeMaskBbox(UTextureRenderTarget2D* MaskTarget, FVector2D& OutMin, FVector2D& OutMax) const;
+	// pixels) que envolve todos os pixels que batem com MaskPixelThreshold,
+	// alem da CONTAGEM real desses pixels (OutVisiblePixelCount -- usada por
+	// BboxQualityReason em vez da area do retangulo, ver MinDronePixelCount).
+	bool ComputeMaskBbox(UTextureRenderTarget2D* MaskTarget, FVector2D& OutMin, FVector2D& OutMax, int32& OutVisiblePixelCount) const;
 
-	EPoseCheckStatus BboxQualityReason(const FVector2D& Min, const FVector2D& Max, int32 Width, int32 Height) const;
+	EPoseCheckStatus BboxQualityReason(const FVector2D& Min, const FVector2D& Max, int32 Width, int32 Height, int32 VisiblePixelCount) const;
 
 	// Substitui a antiga checagem geometrica (raycast + projecao de
 	// cantos) -- captura a mascara, le os pixels, e decide oclusao/bbox a

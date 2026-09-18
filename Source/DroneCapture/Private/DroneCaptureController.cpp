@@ -637,8 +637,10 @@ void ADroneCaptureController::ConfigureDroneMask()
 	}
 }
 
-bool ADroneCaptureController::ComputeMaskBbox(UTextureRenderTarget2D* MaskTarget, FVector2D& OutMin, FVector2D& OutMax) const
+bool ADroneCaptureController::ComputeMaskBbox(UTextureRenderTarget2D* MaskTarget, FVector2D& OutMin, FVector2D& OutMax, int32& OutVisiblePixelCount) const
 {
+	OutVisiblePixelCount = 0;
+
 	if (!MaskTarget)
 	{
 		return false;
@@ -664,6 +666,7 @@ bool ADroneCaptureController::ComputeMaskBbox(UTextureRenderTarget2D* MaskTarget
 	}
 
 	int32 MinX = Width, MaxX = -1, MinY = Height, MaxY = -1;
+	int32 PixelCount = 0;
 	for (int32 Y = 0; Y < Height; ++Y)
 	{
 		const int32 RowOffset = Y * Width;
@@ -676,6 +679,7 @@ bool ADroneCaptureController::ComputeMaskBbox(UTextureRenderTarget2D* MaskTarget
 				MaxX = FMath::Max(MaxX, X);
 				MinY = FMath::Min(MinY, Y);
 				MaxY = FMath::Max(MaxY, Y);
+				PixelCount++;
 			}
 		}
 	}
@@ -687,17 +691,18 @@ bool ADroneCaptureController::ComputeMaskBbox(UTextureRenderTarget2D* MaskTarget
 
 	OutMin = FVector2D((float)MinX, (float)MinY);
 	OutMax = FVector2D((float)(MaxX + 1), (float)(MaxY + 1));
+	OutVisiblePixelCount = PixelCount;
 	return true;
 }
 
-EPoseCheckStatus ADroneCaptureController::BboxQualityReason(const FVector2D& Min, const FVector2D& Max, int32 Width, int32 Height) const
+EPoseCheckStatus ADroneCaptureController::BboxQualityReason(const FVector2D& Min, const FVector2D& Max, int32 Width, int32 Height, int32 VisiblePixelCount) const
 {
-	const float Area = (Max.X - Min.X) * (Max.Y - Min.Y);
-	if (Area < (float)MinBboxAreaPx)
+	if (VisiblePixelCount < MinDronePixelCount)
 	{
 		return EPoseCheckStatus::BboxPequena;
 	}
 
+	const float Area = (Max.X - Min.X) * (Max.Y - Min.Y);
 	if (Area > (float)(Width * Height) * MaxBboxAreaFraction)
 	{
 		return EPoseCheckStatus::BboxMuitoGrande;
@@ -732,13 +737,14 @@ FPoseCheckResult ADroneCaptureController::CheckPoseFromMask(USceneCaptureCompone
 	const int32 Height = MaskComp->TextureTarget->SizeY;
 
 	FVector2D BboxMin, BboxMax;
-	if (!ComputeMaskBbox(MaskComp->TextureTarget, BboxMin, BboxMax))
+	int32 VisiblePixelCount = 0;
+	if (!ComputeMaskBbox(MaskComp->TextureTarget, BboxMin, BboxMax, VisiblePixelCount))
 	{
 		Result.Status = EPoseCheckStatus::Oclusao; // nenhum pixel de drone -- oculto ou fora de campo, tanto faz
 		return Result;
 	}
 
-	Result.Status = BboxQualityReason(BboxMin, BboxMax, Width, Height);
+	Result.Status = BboxQualityReason(BboxMin, BboxMax, Width, Height, VisiblePixelCount);
 	Result.BboxMin = BboxMin;
 	Result.BboxMax = BboxMax;
 	Result.RtWidth = Width;
