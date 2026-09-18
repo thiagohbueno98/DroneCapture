@@ -46,6 +46,26 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Drone Capture", meta = (ClampMin = "1", ClampMax = "4"))
 	int32 SupersampleFactor = 2;
 
+	// Motion blur nativo do motor, ligado SO na captura RGB (a mascara
+	// continua sem blur nenhum -- precisa de bordas nitidas pra threshold
+	// de stencil funcionar). Durante os frames de aquecimento (WarmupCaptures)
+	// so as HELICES tem velocidade de verdade entre um frame e outro (o
+	// corpo do drone fica parado, so muda de pose no proximo PoseIndex) --
+	// o motion blur do motor usa o buffer de velocidade POR OBJETO, entao
+	// borra so o que realmente esta girando, sem afetar o resto da imagem.
+	// Sem isso a helice sai nitida e "congelada", diferente de uma foto
+	// real (obturador tem tempo de exposicao, helice girando rapido sai
+	// borrada). 0 = desligado (comportamento antigo).
+	UPROPERTY(EditAnywhere, Category = "Drone Capture", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float PropellerMotionBlurAmount = 0.5f;
+
+	// Blur maximo (fracao do tamanho da tela) que o motion blur pode
+	// atingir por pixel -- o default do motor (~5% da tela) pode nao ser
+	// suficiente pra cobrir a ponta da helice em close-ups com
+	// PropellerSpinDegPerSec alto, cortando o rastro de blur antes da hora.
+	UPROPERTY(EditAnywhere, Category = "Drone Capture", meta = (ClampMin = "0.0", ClampMax = "100.0", EditCondition = "PropellerMotionBlurAmount > 0.0"))
+	float PropellerMotionBlurMax = 20.0f;
+
 	// Segunda captura, so pra mascara de segmentacao do drone (ver
 	// ADroneCaptureController::CheckPoseFromMask) -- acha oclusao/bbox a
 	// partir dos pixels de verdade em vez de raycast+projecao geometrica.
