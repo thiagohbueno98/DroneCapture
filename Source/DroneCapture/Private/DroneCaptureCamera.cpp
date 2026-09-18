@@ -171,19 +171,17 @@ void ADroneCaptureCamera::ConfigurePostProcess()
 
 	// Efeitos pensados pra camera de jogo/cinematica, nao pra "vigilancia"
 	// estatica -- so introduzem blur/ruido que o detector nao deveria
-	// aprender. Religa so o motion blur logo abaixo (PropellerMotionBlurAmount)
-	// -- esse e desejado de proposito, pra simular a helice borrada de uma
-	// foto real (o resto da imagem fica parado entre os frames de
-	// aquecimento, entao so a helice em movimento e afetada).
+	// aprender.
+	//
+	// Blur de rotacao da helice: TENTATIVA de religar so o motion blur
+	// nativo aqui (MotionBlurAmount/MotionBlurMax + ShowFlags.SetMotionBlur)
+	// NAO funcionou -- confirmado rodando o dataset de verdade, helice saia
+	// sempre nitida independente dessas configuracoes. SceneCaptureComponent2D
+	// nao processa o passe de motion blur do motor (limitacao conhecida da
+	// engine). Solucao de verdade: ADroneCaptureController::CapturePropellerMotionBlur
+	// (blur simulado por media de varios sub-frames, ver PropellerBlurSamples
+	// no header do controller).
 	DisableArtisticPostProcessEffects(Pps);
-
-	if (PropellerMotionBlurAmount > 0.0f)
-	{
-		Pps.bOverride_MotionBlurAmount = true;
-		Pps.MotionBlurAmount = PropellerMotionBlurAmount;
-		Pps.bOverride_MotionBlurMax = true;
-		Pps.MotionBlurMax = PropellerMotionBlurMax;
-	}
 
 	Comp->PostProcessBlendWeight = 1.0f;
 }

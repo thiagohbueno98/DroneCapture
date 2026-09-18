@@ -251,7 +251,11 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 	// aquecimento), le os pixels de volta e decide oclusao/bbox a partir do
 	// que realmente apareceu. Exporta o RGB usando o TextureTarget
 	// preenchido pelo ultimo CaptureScene() da fase 2 (nenhum
-	// ExportSample/ExportDiscardDebug chama CaptureScene() de novo).
+	// ExportSample/ExportDiscardDebug chama CaptureScene() de novo) -- a
+	// nao ser que o blur de helice esteja ligado, ver
+	// CapturePropellerMotionBlur/PendingBlurredRgbPixels.
+	CapturePropellerMotionBlur();
+
 	const FVector Point = GridPoints[PointIndex];
 	for (int32 i = 0; i < Cameras.Num(); ++i)
 	{
@@ -322,6 +326,15 @@ void ADroneCaptureController::SpinPropellers(float DeltaSeconds)
 	}
 
 	PropellerSpinAngleDeg = FMath::Fmod(PropellerSpinAngleDeg + PropellerSpinDegPerSec * DeltaSeconds, 360.0f);
+	SetPropellerSpinAngle(PropellerSpinAngleDeg);
+}
+
+void ADroneCaptureController::SetPropellerSpinAngle(float AngleDeg)
+{
+	if (!Drone)
+	{
+		return;
+	}
 
 	// Cada modelo de drone tem sua propria geometria de helice (reta vs
 	// inclinada) e precisa de um eixo de giro diferente -- se "Drone" for
@@ -373,7 +386,7 @@ void ADroneCaptureController::SpinPropellers(float DeltaSeconds)
 		// quaternions gira em torno do PROPRIO eixo local da helice (aplicado
 		// antes) e so depois aplica a inclinacao base por cima, mantendo a
 		// helice sempre alinhada, so girando.
-		const float SignedSpinAngleDeg = PropellerSpinAngleDeg * DirectionSign;
+		const float SignedSpinAngleDeg = AngleDeg * DirectionSign;
 		FRotator SpinDelta = FRotator::ZeroRotator;
 		switch (EffectiveSpinAxis)
 		{
@@ -383,6 +396,76 @@ void ADroneCaptureController::SpinPropellers(float DeltaSeconds)
 		}
 		const FQuat NewQuat = BaseRotation->Quaternion() * SpinDelta.Quaternion();
 		Mesh->SetRelativeRotation(NewQuat.Rotator());
+	}
+}
+
+void ADroneCaptureController::CapturePropellerMotionBlur()
+{
+	PendingBlurredRgbPixels.Reset();
+
+	if (PropellerBlurSamples <= 1)
+	{
+		return;
+	}
+
+	for (USceneCaptureComponent2D* RgbComp : CameraComponents)
+	{
+		if (!RgbComp || !RgbComp->TextureTarget)
+		{
+			continue;
+		}
+
+		const int32 Width = RgbComp->TextureTarget->SizeX;
+		const int32 Height = RgbComp->TextureTarget->SizeY;
+		if (Width <= 0 || Height <= 0)
+		{
+			continue;
+		}
+
+		TArray<FLinearColor> Accum;
+		Accum.SetNumZeroed(Width * Height);
+
+		// Varre de "PropellerSpinAngleDeg - Sweep" ate "PropellerSpinAngleDeg"
+		// (a ULTIMA amostra bate exatamente com o angulo real final) -- box
+		// filter no tempo, mesma ideia do supersampling espacial em
+		// ExportCaptureToPng, so que aqui a media e entre FRAMES em vez de
+		// entre TEXELS.
+		for (int32 Sample = 0; Sample < PropellerBlurSamples; ++Sample)
+		{
+			const float T = (float)Sample / (float)(PropellerBlurSamples - 1);
+			SetPropellerSpinAngle(PropellerSpinAngleDeg - PropellerBlurSweepDeg * (1.0f - T));
+
+			RgbComp->CaptureScene();
+			FlushRenderingCommands();
+
+			FTextureRenderTargetResource* RTResource = RgbComp->TextureTarget->GameThread_GetRenderTargetResource();
+			TArray<FColor> SubFramePixels;
+			if (!RTResource || !RTResource->ReadPixels(SubFramePixels) || SubFramePixels.Num() != Accum.Num())
+			{
+				continue;
+			}
+			for (int32 PixelIdx = 0; PixelIdx < SubFramePixels.Num(); ++PixelIdx)
+			{
+				Accum[PixelIdx] += FLinearColor(SubFramePixels[PixelIdx]);
+			}
+		}
+
+		// A mascara (capturada logo depois, por camera, no loop principal do
+		// Tick) precisa bater com a ULTIMA posicao real da helice -- senao
+		// volta o bug de "ponta da pa fora da bbox" ja corrigido antes. O
+		// ultimo sample do loop acima ja deixa nesse angulo (T=1), mas
+		// reforca explicito aqui pra nao depender dessa ordem por acidente.
+		SetPropellerSpinAngle(PropellerSpinAngleDeg);
+
+		const float InvSamples = 1.0f / (float)PropellerBlurSamples;
+		TArray<FColor> Averaged;
+		Averaged.SetNumUninitialized(Accum.Num());
+		for (int32 PixelIdx = 0; PixelIdx < Accum.Num(); ++PixelIdx)
+		{
+			Averaged[PixelIdx] = (Accum[PixelIdx] * InvSamples).ToFColor(true);
+		}
+
+		PendingBlurredRgbPixels.Add(RgbComp, MoveTemp(Averaged));
 	}
 }
 
@@ -869,43 +952,68 @@ void ADroneCaptureController::ExportCaptureToPng(USceneCaptureComponent2D* RgbCo
 		return;
 	}
 
-	// FlushRenderingCommands() de verdade (funcao de engine), nao o hack de
-	// console command usado no fluxo Python/Blueprint (que nao funcionava
-	// em Play mode -- ver contexto.md).
-	FlushRenderingCommands();
+	const int32 SrcWidth = RgbComp->TextureTarget->SizeX;
+	const int32 SrcHeight = RgbComp->TextureTarget->SizeY;
+
+	// Se o blur de helice esta ligado (ver CapturePropellerMotionBlur), usa
+	// o buffer JA MEDIADO entre varios sub-frames em vez de reler a GPU --
+	// a textura em si so tem o ULTIMO sub-frame capturado (nitido, sem
+	// blur nenhum).
+	TArray<FColor> FreshPixels;
+	const TArray<FColor>* SrcPixels = PendingBlurredRgbPixels.Find(RgbComp);
+
+	if (!SrcPixels)
+	{
+		// FlushRenderingCommands() de verdade (funcao de engine), nao o hack
+		// de console command usado no fluxo Python/Blueprint (que nao
+		// funcionava em Play mode -- ver contexto.md).
+		FlushRenderingCommands();
+
+		if (SupersampleFactor <= 1)
+		{
+			UKismetRenderingLibrary::ExportRenderTarget(const_cast<ADroneCaptureController*>(this), RgbComp->TextureTarget, OutDir, FileName);
+			return;
+		}
+
+		FTextureRenderTargetResource* RTResource = RgbComp->TextureTarget->GameThread_GetRenderTargetResource();
+		if (!RTResource || !RTResource->ReadPixels(FreshPixels) || FreshPixels.Num() <= 0)
+		{
+			return;
+		}
+		SrcPixels = &FreshPixels;
+	}
+
+	if (SrcPixels->Num() != SrcWidth * SrcHeight)
+	{
+		return;
+	}
 
 	if (SupersampleFactor <= 1)
 	{
-		UKismetRenderingLibrary::ExportRenderTarget(const_cast<ADroneCaptureController*>(this), RgbComp->TextureTarget, OutDir, FileName);
+		// Sem supersample mas COM blur (cache preenchido): precisa compactar
+		// na unha -- o atalho ExportRenderTarget so le direto da GPU, nao de
+		// um buffer ja em memoria.
+		TArray64<uint8> CompressedPng;
+		FImageUtils::PNGCompressImageArray(SrcWidth, SrcHeight, TArrayView64<const FColor>(SrcPixels->GetData(), SrcPixels->Num()), CompressedPng);
+		IFileManager::Get().MakeDirectory(*OutDir, true);
+		const FString FilePath = FPaths::Combine(OutDir, FileName);
+		FFileHelper::SaveArrayToFile(TArrayView64<const uint8>(CompressedPng.GetData(), CompressedPng.Num()), *FilePath);
 		return;
 	}
 
 	// Supersampling ligado (ver ADroneCaptureCamera::SupersampleFactor): o
 	// TextureTarget foi renderizado SupersampleFactor vezes maior de
 	// proposito. Reduz aqui por "box filter" de verdade -- le os pixels
-	// brutos da GPU, converte cada um pra espaco LINEAR (FLinearColor a
-	// partir de FColor ja faz a conversao sRGB->linear), calcula a MEDIA dos
-	// SupersampleFactor x SupersampleFactor texels de cada pixel final, e so
-	// converte de volta pra sRGB no final. Fazer a media em espaco linear (em
-	// vez de so redimensionar a imagem grande com filtragem bilinear de 1
-	// amostra) e o que de fato reduz ruido/serrilhado (mesma ideia de SSAA).
-	FTextureRenderTargetResource* RTResource = RgbComp->TextureTarget->GameThread_GetRenderTargetResource();
-	if (!RTResource)
-	{
-		return;
-	}
-
-	TArray<FColor> SrcPixels;
-	if (!RTResource->ReadPixels(SrcPixels) || SrcPixels.Num() <= 0)
-	{
-		return;
-	}
-
-	const int32 SrcWidth = RgbComp->TextureTarget->SizeX;
-	const int32 SrcHeight = RgbComp->TextureTarget->SizeY;
+	// brutos da GPU (ou o buffer ja mediado do blur, ver acima), converte
+	// cada um pra espaco LINEAR (FLinearColor a partir de FColor ja faz a
+	// conversao sRGB->linear), calcula a MEDIA dos SupersampleFactor x
+	// SupersampleFactor texels de cada pixel final, e so converte de volta
+	// pra sRGB no final. Fazer a media em espaco linear (em vez de so
+	// redimensionar a imagem grande com filtragem bilinear de 1 amostra) e
+	// o que de fato reduz ruido/serrilhado (mesma ideia de SSAA).
 	const int32 DstWidth = SrcWidth / SupersampleFactor;
 	const int32 DstHeight = SrcHeight / SupersampleFactor;
-	if (DstWidth <= 0 || DstHeight <= 0 || SrcPixels.Num() != SrcWidth * SrcHeight)
+	if (DstWidth <= 0 || DstHeight <= 0)
 	{
 		return;
 	}
@@ -926,7 +1034,7 @@ void ADroneCaptureController::ExportCaptureToPng(USceneCaptureComponent2D* RgbCo
 				const int32 RowOffset = (SrcY0 + SubY) * SrcWidth;
 				for (int32 SubX = 0; SubX < SupersampleFactor; ++SubX)
 				{
-					Sum += FLinearColor(SrcPixels[RowOffset + SrcX0 + SubX]);
+					Sum += FLinearColor((*SrcPixels)[RowOffset + SrcX0 + SubX]);
 				}
 			}
 			DstPixels[DstY * DstWidth + DstX] = (Sum * InvSampleCount).ToFColor(true);

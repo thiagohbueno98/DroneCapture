@@ -284,6 +284,25 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Helices")
 	EPropellerSpinAxis PropellerSpinAxis = EPropellerSpinAxis::Yaw;
 
+	// Blur de rotacao da helice na imagem RGB -- SceneCaptureComponent2D
+	// NAO suporta motion blur nativo do motor (limitacao conhecida da
+	// engine: o passe de velocidade que o motion blur depende nao roda no
+	// caminho de scene capture, confirmado testando MotionBlurAmount +
+	// ShowFlags.SetMotionBlur(true) sem nenhum efeito). Simulado aqui na
+	// unha: captura PropellerBlurSamples sub-frames da helice varrendo
+	// PropellerBlurSweepDeg graus (terminando exatamente no angulo real
+	// final, pra bater com o instante usado pela mascara) e faz a MEDIA em
+	// espaco linear -- mesma ideia do supersampling espacial
+	// (ExportCaptureToPng), so que no tempo em vez de no espaco. 1 ou
+	// menos = desliga (comportamento antigo, helice sempre nitida).
+	// Custo: PropellerBlurSamples CaptureScene()+ReadPixels() extras POR
+	// CAMERA a cada pose exportada.
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Helices", meta = (ClampMin = "1", ClampMax = "16"))
+	int32 PropellerBlurSamples = 6;
+
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Helices", meta = (ClampMin = "0.0", ClampMax = "90.0", EditCondition = "PropellerBlurSamples > 1"))
+	float PropellerBlurSweepDeg = 20.0f;
+
 	// ------------------------------------------------------------------
 	// Controle (chamavel de Blueprint se quiser disparar na mao)
 	// ------------------------------------------------------------------
@@ -322,6 +341,13 @@ private:
 	TArray<USceneCaptureComponent2D*> CameraComponents;
 	TMap<FString, int32> DiscardCountByReason;
 
+	// Pixels RGB ja com o blur de helice aplicado (media de varios sub-
+	// frames, ver CapturePropellerMotionBlur), preenchido 1x por pose antes
+	// do loop de export -- ExportCaptureToPng usa isso em vez de reler a
+	// GPU quando presente (a textura em si so tem o ULTIMO sub-frame,
+	// nitido). Fica vazio se PropellerBlurSamples <= 1.
+	TMap<USceneCaptureComponent2D*, TArray<FColor>> PendingBlurredRgbPixels;
+
 	// Estado da fase de "aquecimento" (ver comentario em WarmupCaptures) da
 	// pose atual. -1 = pose ainda nao comecou (precisa mover o drone); >0 =
 	// ainda faltam N Ticks reais de CaptureScene() antes de poder exportar;
@@ -337,6 +363,18 @@ private:
 	float PropellerSpinAngleDeg = 0.0f;
 
 	void SpinPropellers(float DeltaSeconds);
+
+	// Aplica um angulo de giro EXPLICITO nas helices (extraido de
+	// SpinPropellers pra reuso em CapturePropellerMotionBlur, que precisa
+	// varrer varios angulos sub-frame sem mexer no PropellerSpinAngleDeg
+	// "de verdade" acumulado por Tick).
+	void SetPropellerSpinAngle(float AngleDeg);
+
+	// Simula motion blur de helice (ver PropellerBlurSamples no header) --
+	// preenche PendingBlurredRgbPixels por camera, restaura o angulo real
+	// da helice no final (a mascara, capturada logo depois, precisa bater
+	// com esse angulo).
+	void CapturePropellerMotionBlur();
 	void ShowSetupMenu();
 	int32 GetYawCount() const { return bRandomYaw ? FMath::Max(1, YawSamplesPerPoint) : YawAnglesDeg.Num(); }
 
