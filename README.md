@@ -24,7 +24,7 @@ Fazer essa máscara respeitar oclusão de verdade (se tem uma parede na frente d
 
 Renderizar em tempo real deixa um pouco de granulado na imagem, principalmente em bordas e reflexos. Para reduzir isso, cada foto é tirada numa resolução maior do que o tamanho final e depois reduzida fazendo a média dos pixels vizinhos, a mesma técnica usada em anti-aliasing de jogos. O resultado é uma imagem final mais limpa, sem custo perceptível de qualidade.
 
-![Comparação entre o pipeline anterior deste projeto e o atual, mesma cena](Docs/comparacao_resolucao.jpg)
+![Mesma cena, mesma pose do drone, capturada sem e com a técnica de resolução maior reduzida depois. Repare no serrilhado das linhas do tijolo à esquerda, ausente à direita](Docs/comparacao_resolucao.jpg)
 
 ### Hélice borrada de verdade
 
