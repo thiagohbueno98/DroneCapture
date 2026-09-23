@@ -243,6 +243,33 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Drone Capture")
 	bool bApplyQualitySettingsOnStart = true;
 
+	// ------------------------------------------------------------------
+	// Espera de carregamento do mapa -- achado rodando city1 (2026-09-23):
+	// as primeiras poses saiam com carros/trafego ainda nao renderizados
+	// (populam aos poucos depois do BeginPlay, sistema de spawn da propria
+	// cena, fora do controle deste plugin), contaminando o inicio do
+	// dataset com cenas incompletas. StartCapture() agora so comeca a
+	// mover o drone/capturar depois dessa espera (tempo minimo fixo +,
+	// opcionalmente, streaming de nivel completo) -- ver Tick(),
+	// bWaitingForLevelLoad.
+	// ------------------------------------------------------------------
+
+	// Tempo minimo (segundos, tempo real apos StartCapture) esperado antes
+	// da 1a pose -- da tempo de sistemas de spawn (trafego, pedestres etc.)
+	// popularem a cena. Ajuste empiricamente por mapa (mapas mais pesados
+	// podem precisar de mais). 0 desliga a espera fixa (so streaming, se
+	// bWaitForLevelStreamingComplete estiver ligado).
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Carregamento", meta = (ClampMin = "0.0"))
+	float MapLoadWaitSeconds = 15.0f;
+
+	// Alem do tempo fixo acima, espera todo ULevelStreaming do mundo sair
+	// dos estados "carregando" (relevante em mapas com World Partition,
+	// que streamam celulas conforme o Pawn observador se move). Nao cobre
+	// sistemas de spawn de trafego/pedestres proprios da cena (esses so
+	// tem o tempo fixo acima como mitigacao).
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Carregamento")
+	bool bWaitForLevelStreamingComplete = true;
+
 	// Se ligado, BeginPlay mostra um menu (modelo de drone, pasta/nome do
 	// dataset, horario do dia) antes de comecar -- bAutoStartOnBeginPlay
 	// so tem efeito se este estiver DESLIGADO (fluxo antigo, sem menu, pra
@@ -341,6 +368,24 @@ private:
 	TArray<FVector> GridPoints;
 	TArray<USceneCaptureComponent2D*> CameraComponents;
 	TMap<FString, int32> DiscardCountByReason;
+
+	// Estado da espera de carregamento do mapa (ver MapLoadWaitSeconds no
+	// header) -- true entre o StartCapture() e a 1a pose de verdade.
+	bool bWaitingForLevelLoad = false;
+	float LevelLoadElapsedSeconds = 0.0f;
+
+	// Timestamp (FPlatformTime::Seconds()) de quando a 1a pose de verdade
+	// comecou -- usado pra estimar tempo restante no HUD de progresso (ver
+	// ShowProgressOnScreen).
+	double CaptureStartTimeSeconds = 0.0;
+
+	// Mostra num HUD simples (GEngine::AddOnScreenDebugMessage, mesma
+	// "linha" reaproveitada via chave fixa) quantas poses ja foram
+	// processadas e uma estimativa de tempo restante -- so uma nocao
+	// aproximada de progresso durante uma rodada longa, nao precisao.
+	void ShowProgressOnScreen(int32 Total) const;
+
+	bool IsLevelStreamingComplete() const;
 
 	// Pixels RGB ja com o blur de helice aplicado (media de varios sub-
 	// frames, ver CapturePropellerMotionBlur), preenchido 1x por pose antes

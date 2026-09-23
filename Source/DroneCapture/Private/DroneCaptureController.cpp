@@ -25,6 +25,9 @@
 #include "Blueprint/UserWidget.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
+#include "Engine/LevelStreaming.h"
+#include "Engine/Engine.h"
+#include "HAL/PlatformTime.h"
 
 namespace DroneCaptureInternal
 {
@@ -47,6 +50,29 @@ namespace DroneCaptureInternal
 			Values.Add(Start);
 		}
 		return Values;
+	}
+
+	// Chaves fixas pro HUD (GEngine::AddOnScreenDebugMessage com a mesma
+	// chave substitui a mensagem no lugar em vez de empilhar uma nova a
+	// cada Tick).
+	static constexpr int32 OnScreenKeyProgress = 90210001;
+	static constexpr int32 OnScreenKeyLoadWait = 90210002;
+
+	static FString FormatDuration(double Seconds)
+	{
+		if (Seconds < 0.0)
+		{
+			return TEXT("--");
+		}
+		const int32 TotalSeconds = FMath::RoundToInt(Seconds);
+		const int32 H = TotalSeconds / 3600;
+		const int32 M = (TotalSeconds % 3600) / 60;
+		const int32 S = TotalSeconds % 60;
+		if (H > 0)
+		{
+			return FString::Printf(TEXT("%dh%02dm"), H, M);
+		}
+		return FString::Printf(TEXT("%dm%02ds"), M, S);
 	}
 }
 
@@ -138,28 +164,86 @@ void ADroneCaptureController::StartCapture()
 	PoseIndex = 0;
 	WarmupFramesLeft = -1;
 	DiscardCountByReason.Reset();
+	bWaitingForLevelLoad = false;
 
 	const int32 YawCount = GetYawCount();
-	bIsRunning = Drone != nullptr
+	const bool bSceneReady = Drone != nullptr
 		&& GridVolume != nullptr
 		&& Cameras.Num() > 0
 		&& GridPoints.Num() > 0
 		&& YawCount > 0;
 
-	if (!bIsRunning)
+	if (!bSceneReady)
 	{
+		bIsRunning = false;
 		UE_LOG(LogTemp, Error, TEXT("[DroneCapture] Nao foi possivel iniciar a captura -- confira Drone/Cameras/GridVolume/YawAnglesDeg."));
+		return;
 	}
-	else
+
+	if (MapLoadWaitSeconds > 0.0f || bWaitForLevelStreamingComplete)
 	{
-		UE_LOG(LogTemp, Log, TEXT("[DroneCapture] Iniciando: %d posicoes x %d yaws x %d cameras = %d checagens."),
+		bIsRunning = false;
+		bWaitingForLevelLoad = true;
+		LevelLoadElapsedSeconds = 0.0f;
+		UE_LOG(LogTemp, Log, TEXT("[DroneCapture] Aguardando carregamento do mapa (minimo %.0fs%s) antes da 1a pose -- %d posicoes x %d yaws x %d cameras = %d checagens planejadas."),
+			MapLoadWaitSeconds, bWaitForLevelStreamingComplete ? TEXT(" + streaming completo") : TEXT(""),
 			GridPoints.Num(), YawCount, Cameras.Num(), GridPoints.Num() * YawCount * Cameras.Num());
+		return;
 	}
+
+	bIsRunning = true;
+	CaptureStartTimeSeconds = FPlatformTime::Seconds();
+	UE_LOG(LogTemp, Log, TEXT("[DroneCapture] Iniciando: %d posicoes x %d yaws x %d cameras = %d checagens."),
+		GridPoints.Num(), YawCount, Cameras.Num(), GridPoints.Num() * YawCount * Cameras.Num());
 }
 
 void ADroneCaptureController::StopCapture()
 {
 	bIsRunning = false;
+	bWaitingForLevelLoad = false;
+}
+
+bool ADroneCaptureController::IsLevelStreamingComplete() const
+{
+	const UWorld* World = GetWorld();
+	if (!World)
+	{
+		return true;
+	}
+
+	for (ULevelStreaming* Level : World->GetStreamingLevels())
+	{
+		if (!Level)
+		{
+			continue;
+		}
+		const ELevelStreamingState State = Level->GetLevelStreamingState();
+		if (State == ELevelStreamingState::Loading
+			|| State == ELevelStreamingState::MakingVisible)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+void ADroneCaptureController::ShowProgressOnScreen(int32 Total) const
+{
+	if (!GEngine)
+	{
+		return;
+	}
+
+	const double ElapsedSec = FPlatformTime::Seconds() - CaptureStartTimeSeconds;
+	const double AvgSecPerPose = PoseIndex > 0 ? ElapsedSec / (double)PoseIndex : -1.0;
+	const double RemainingSec = AvgSecPerPose >= 0.0 ? AvgSecPerPose * (double)FMath::Max(Total - PoseIndex, 0) : -1.0;
+	const float PercentDone = Total > 0 ? 100.0f * (float)PoseIndex / (float)Total : 0.0f;
+
+	GEngine->AddOnScreenDebugMessage(DroneCaptureInternal::OnScreenKeyProgress, 1.5f, FColor::Cyan,
+		FString::Printf(TEXT("[DroneCapture] pose %d/%d (%.1f%%) | faltam %d | decorrido %s | restante estimado %s"),
+			PoseIndex, Total, PercentDone, FMath::Max(Total - PoseIndex, 0),
+			*DroneCaptureInternal::FormatDuration(ElapsedSec),
+			*DroneCaptureInternal::FormatDuration(RemainingSec)));
 }
 
 float ADroneCaptureController::GetProgress() const
@@ -178,6 +262,30 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 
 	SpinPropellers(DeltaSeconds);
 
+	if (bWaitingForLevelLoad)
+	{
+		LevelLoadElapsedSeconds += DeltaSeconds;
+		const bool bStreamingOk = !bWaitForLevelStreamingComplete || IsLevelStreamingComplete();
+		const bool bTimeOk = LevelLoadElapsedSeconds >= MapLoadWaitSeconds;
+
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(DroneCaptureInternal::OnScreenKeyLoadWait, 1.5f, FColor::Yellow,
+				FString::Printf(TEXT("[DroneCapture] aguardando mapa carregar... %.0fs/%.0fs%s"),
+					LevelLoadElapsedSeconds, MapLoadWaitSeconds,
+					bWaitForLevelStreamingComplete ? (bStreamingOk ? TEXT(" | streaming: completo") : TEXT(" | streaming: carregando...")) : TEXT("")));
+		}
+
+		if (bTimeOk && bStreamingOk)
+		{
+			bWaitingForLevelLoad = false;
+			bIsRunning = true;
+			CaptureStartTimeSeconds = FPlatformTime::Seconds();
+			UE_LOG(LogTemp, Log, TEXT("[DroneCapture] Mapa carregado (%.0fs de espera) -- iniciando captura."), LevelLoadElapsedSeconds);
+		}
+		return;
+	}
+
 	if (!bIsRunning)
 	{
 		return;
@@ -190,9 +298,16 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 	{
 		bIsRunning = false;
 		WriteDataYaml();
+		if (GEngine)
+		{
+			GEngine->AddOnScreenDebugMessage(DroneCaptureInternal::OnScreenKeyProgress, 6.0f, FColor::Green,
+				FString::Printf(TEXT("[DroneCapture] concluido: %d poses processadas."), Total));
+		}
 		UE_LOG(LogTemp, Log, TEXT("[DroneCapture] Rodada concluida: %d poses processadas."), Total);
 		return;
 	}
+
+	ShowProgressOnScreen(Total);
 
 	const int32 PointIndex = PoseIndex / YawCount;
 	const int32 YawIdx = PoseIndex % YawCount;
