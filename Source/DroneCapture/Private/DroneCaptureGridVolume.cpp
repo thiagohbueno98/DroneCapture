@@ -1,6 +1,7 @@
 #include "DroneCaptureGridVolume.h"
 
 #include "Components/BoxComponent.h"
+#include "Components/WorldPartitionStreamingSourceComponent.h"
 
 ADroneCaptureGridVolume::ADroneCaptureGridVolume()
 {
@@ -11,6 +12,13 @@ ADroneCaptureGridVolume::ADroneCaptureGridVolume()
 	Bounds->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	Bounds->SetGenerateOverlapEvents(false);
 	RootComponent = Bounds;
+
+	StreamingSource = CreateDefaultSubobject<UWorldPartitionStreamingSourceComponent>(TEXT("StreamingSource"));
+	StreamingSource->Priority = EStreamingSourcePriority::High;
+
+#if WITH_EDITORONLY_DATA
+	bIsSpatiallyLoaded = false;
+#endif
 
 	Tags.Add(TEXT("VolumeGrid"));
 }

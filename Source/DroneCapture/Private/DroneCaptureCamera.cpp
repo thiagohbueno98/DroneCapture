@@ -38,6 +38,11 @@ namespace
 
 ADroneCaptureCamera::ADroneCaptureCamera()
 {
+#if WITH_EDITORONLY_DATA
+	// Sempre carregado no World Partition (ver ADroneCaptureGridVolume).
+	bIsSpatiallyLoaded = false;
+#endif
+
 	if (USceneCaptureComponent2D* Comp = GetCaptureComponent2D())
 	{
 		Comp->CaptureSource = ESceneCaptureSource::SCS_FinalColorLDR;

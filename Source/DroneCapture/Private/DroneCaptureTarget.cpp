@@ -100,6 +100,11 @@ ADroneCaptureTarget::ADroneCaptureTarget()
 {
 	PrimaryActorTick.bCanEverTick = false;
 
+#if WITH_EDITORONLY_DATA
+	// Sempre carregado no World Partition (ver ADroneCaptureGridVolume).
+	bIsSpatiallyLoaded = false;
+#endif
+
 	Corpo = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("Corpo"));
 	RootComponent = Corpo;
 

@@ -240,6 +240,7 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Drone Capture")
 	bool bAutoStartOnBeginPlay = true;
 
+	// Aplicado no BeginPlay (nao no StartCapture) -- ver comentario la.
 	UPROPERTY(EditAnywhere, Category = "Drone Capture")
 	bool bApplyQualitySettingsOnStart = true;
 
@@ -360,6 +361,7 @@ public:
 protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 private:
 	// Estado da rodada
@@ -429,6 +431,14 @@ private:
 	void ResolveSceneReferences();
 	void BuildGridPoints();
 	void ApplyQualitySettings();
+
+	// CVars sao globais do processo do editor (nao do mundo do PIE): o que
+	// ApplyQualitySettings/ConfigureDroneMask mudam continuaria valendo
+	// depois do Stop. SetCVarRemembering guarda o valor ORIGINAL (so na 1a
+	// mudanca de cada CVar) e RestoreCVars volta tudo no EndPlay.
+	void SetCVarRemembering(const TCHAR* Name, const FString& Value);
+	void RestoreCVars();
+	TMap<FString, FString> OriginalCVarValues;
 	void WriteDataYaml() const;
 
 	// Marca os componentes do drone com CustomStencil=MaskStencilValue --

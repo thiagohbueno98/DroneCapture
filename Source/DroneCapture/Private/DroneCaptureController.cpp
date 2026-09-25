@@ -28,6 +28,8 @@
 #include "Engine/LevelStreaming.h"
 #include "Engine/Engine.h"
 #include "HAL/PlatformTime.h"
+#include "HAL/IConsoleManager.h"
+#include "WorldPartition/WorldPartitionSubsystem.h"
 
 namespace DroneCaptureInternal
 {
@@ -80,11 +82,26 @@ ADroneCaptureController::ADroneCaptureController()
 {
 	PrimaryActorTick.bCanEverTick = true;
 	SetupWidgetClass = UDroneCaptureSetupWidget::StaticClass();
+
+#if WITH_EDITORONLY_DATA
+	// Sempre carregado no World Partition (ver ADroneCaptureGridVolume).
+	bIsSpatiallyLoaded = false;
+#endif
 }
 
 void ADroneCaptureController::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Qualidade grafica aplicada JA no BeginPlay, antes do menu/StartCapture:
+	// mudar sg.* com o jogo rodando reregistra todos os componentes do mundo,
+	// e no City Sample isso pegava carros do MassTraffic ja vivos -- o agente
+	// era registrado 2x e o motor crashava (assert em MassAgentComponent.cpp:227,
+	// ver contexto.md). Aqui o trafego ainda nao spawnou nada.
+	if (bApplyQualitySettingsOnStart)
+	{
+		ApplyQualitySettings();
+	}
 
 	if (bShowSetupMenuOnBeginPlay)
 	{
@@ -156,11 +173,6 @@ void ADroneCaptureController::StartCapture()
 	ResolveSceneReferences();
 	BuildGridPoints();
 
-	if (bApplyQualitySettingsOnStart)
-	{
-		ApplyQualitySettings();
-	}
-
 	PoseIndex = 0;
 	WarmupFramesLeft = -1;
 	DiscardCountByReason.Reset();
@@ -209,6 +221,17 @@ bool ADroneCaptureController::IsLevelStreamingComplete() const
 	if (!World)
 	{
 		return true;
+	}
+
+	// Celulas do World Partition (City Sample etc.) -- GetStreamingLevels
+	// abaixo so cobre sub-niveis classicos. Sem argumento, checa todas as
+	// fontes de streaming (jogador + StreamingSource do GridVolume).
+	if (const UWorldPartitionSubsystem* WorldPartition = World->GetSubsystem<UWorldPartitionSubsystem>())
+	{
+		if (!WorldPartition->IsStreamingCompleted())
+		{
+			return false;
+		}
 	}
 
 	for (ULevelStreaming* Level : World->GetStreamingLevels())
@@ -774,16 +797,64 @@ void ADroneCaptureController::ApplyQualitySettings()
 		TEXT("sg.TextureQuality"), TEXT("sg.EffectsQuality"), TEXT("sg.FoliageQuality"), TEXT("sg.ShadingQuality"),
 	};
 
-	UWorld* World = GetWorld();
 	for (const TCHAR* CVar : ScalabilityCVars)
 	{
-		UKismetSystemLibrary::ExecuteConsoleCommand(World, FString::Printf(TEXT("%s 3"), CVar));
+		SetCVarRemembering(CVar, TEXT("3"));
 	}
-	UKismetSystemLibrary::ExecuteConsoleCommand(World, TEXT("r.Streaming.FullyLoadUsedTextures 1"));
-	UKismetSystemLibrary::ExecuteConsoleCommand(World, TEXT("r.Shadow.Virtual.Enable 1"));
-	UKismetSystemLibrary::ExecuteConsoleCommand(World, TEXT("r.Shadow.MaxResolution 4096"));
+	SetCVarRemembering(TEXT("r.Streaming.FullyLoadUsedTextures"), TEXT("1"));
+	SetCVarRemembering(TEXT("r.Shadow.Virtual.Enable"), TEXT("1"));
+	SetCVarRemembering(TEXT("r.Shadow.MaxResolution"), TEXT("4096"));
 
 	UE_LOG(LogTemp, Log, TEXT("[DroneCapture] Configuracoes de qualidade grafica aplicadas."));
+}
+
+void ADroneCaptureController::SetCVarRemembering(const TCHAR* Name, const FString& Value)
+{
+	IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(Name);
+	if (!CVar)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[DroneCapture] CVar %s nao existe nesta versao do motor -- ignorado."), Name);
+		return;
+	}
+	// Ja esta no valor pedido: nao mexe. Setar de novo dispara os callbacks
+	// da CVar (e no caso do sg.* um reregistro global de componentes) a toa.
+	const FString Current = CVar->GetString();
+	const bool bSameValue = Current == Value
+		|| (Current.IsNumeric() && Value.IsNumeric() && FCString::Atof(*Current) == FCString::Atof(*Value));
+	if (bSameValue)
+	{
+		return;
+	}
+	if (!OriginalCVarValues.Contains(Name))
+	{
+		OriginalCVarValues.Add(Name, Current);
+	}
+	// Mesma prioridade de digitar no console (o que o ExecuteConsoleCommand
+	// usado antes fazia) -- com prioridade menor o sg.* seria ignorado.
+	CVar->Set(*Value, ECVF_SetByConsole);
+}
+
+void ADroneCaptureController::RestoreCVars()
+{
+	for (const TPair<FString, FString>& Entry : OriginalCVarValues)
+	{
+		if (IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(*Entry.Key))
+		{
+			CVar->Set(*Entry.Value, ECVF_SetByConsole);
+		}
+	}
+	if (OriginalCVarValues.Num() > 0)
+	{
+		UE_LOG(LogTemp, Log, TEXT("[DroneCapture] %d CVars restauradas pros valores de antes do Play."), OriginalCVarValues.Num());
+	}
+	OriginalCVarValues.Reset();
+}
+
+void ADroneCaptureController::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	StopCapture();
+	RestoreCVars();
+	Super::EndPlay(EndPlayReason);
 }
 
 void ADroneCaptureController::WriteDataYaml() const
@@ -818,10 +889,7 @@ void ADroneCaptureController::ConfigureDroneMask()
 	// componentes -- ver contexto.md). Forcado aqui via console command
 	// pra funcionar em qualquer projeto novo sem passo manual nenhum
 	// (documentar no README nao seria suficiente -- usuario esqueceria).
-	if (UWorld* World = GetWorld())
-	{
-		UKismetSystemLibrary::ExecuteConsoleCommand(World, TEXT("r.CustomDepth 3"));
-	}
+	SetCVarRemembering(TEXT("r.CustomDepth"), TEXT("3"));
 
 	// TODOS os componentes visuais do drone (nao so os com colisao -- aqui
 	// queremos a silhueta VISIVEL de verdade, colisao nao importa mais).
