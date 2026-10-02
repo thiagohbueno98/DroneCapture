@@ -68,7 +68,11 @@ ADroneCaptureCamera::ADroneCaptureCamera()
 	MaskCaptureComponent->bCaptureEveryFrame = false;
 	MaskCaptureComponent->bCaptureOnMovement = false;
 
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> MaskMaterialFinder(TEXT("/DroneCapture/Materials/M_DroneMask.M_DroneMask"));
+	// M_DroneMask2 (ue_python/criar_material_mascara_v2.py): so stencil == 250
+	// conta como drone. O M_DroneMask antigo aceitava qualquer stencil acima
+	// de um limiar, e objetos da cena com CustomStencil proprio (carros do
+	// CitySample) entravam na mascara.
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> MaskMaterialFinder(TEXT("/DroneCapture/Materials/M_DroneMask2.M_DroneMask2"));
 	if (MaskMaterialFinder.Succeeded())
 	{
 		MaskCaptureComponent->PostProcessSettings.WeightedBlendables.Array.Add(FWeightedBlendable(1.0f, MaskMaterialFinder.Object));

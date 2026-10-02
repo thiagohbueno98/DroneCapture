@@ -26,6 +26,7 @@ enum class EPoseCheckStatus : uint8
 	BboxPequena = 3,
 	BboxNaBorda = 4,
 	BboxMuitoGrande = 5,
+	PoucoVisivel = 6,
 };
 
 // EPropellerSpinAxis agora mora em DroneCaptureTarget.h (e por-modelo, nao
@@ -41,6 +42,7 @@ struct FPoseCheckResult
 	FVector2D BboxMax = FVector2D::ZeroVector;
 	int32 RtWidth = 0;
 	int32 RtHeight = 0;
+	int32 VisiblePixelCount = 0;
 };
 
 /**
@@ -124,8 +126,28 @@ public:
 	// bem separados, gera uma bbox (retangulo que envolve os 2 fragmentos)
 	// com area consideravel mesmo tendo pouquissimo drone de fato visivel --
 	// medir pixel real em vez da area do retangulo pega esse caso.
-	UPROPERTY(EditAnywhere, Category = "Drone Capture|Qualidade")
-	int32 MinDronePixelCount = 200;
+	//
+	// Default baixo de proposito: com 200, o dataset ficava sem drone distante
+	// (95% das caixas com mais de 39 px de lado) e o detector perdia quase todo
+	// drone real menor que 32 px. Medido com o DJI Mini a FOV 90 em 1920x1080:
+	// caixa de ~1600/distancia(m) px de largura, e 15 px de mascara equivalem a
+	// uma caixa de ~15x5 px (~110 m). O caso do drone quase todo ocluido e pego
+	// por MinVisibleFraction.
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Qualidade", meta = (ClampMin = "1"))
+	int32 MinDronePixelCount = 15;
+
+	// Abaixo dessa contagem de pixels visiveis nao da pra saber, so pela
+	// mascara, se o drone esta longe (amostra boa) ou quase todo escondido
+	// (amostra ruim). Nesse caso a mascara e capturada de novo com SO o drone
+	// na cena (silhueta inteira, sem nada na frente) e a pose so e aceita se
+	// pelo menos MinVisibleFraction da silhueta estiver visivel. Acima dessa
+	// contagem a pose e aceita direto, como sempre foi. MinVisibleFraction = 0
+	// desliga a checagem.
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Qualidade", meta = (ClampMin = "0"))
+	int32 OcclusionCheckPixelCount = 200;
+
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Qualidade", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MinVisibleFraction = 0.5f;
 
 	// Margem (fracao da largura/altura) que a bbox precisa manter em relacao
 	// a borda da imagem pra NAO ser descartada. Default 0 -- desligado de
@@ -180,11 +202,12 @@ public:
 	// ------------------------------------------------------------------
 
 	// Valor de CustomDepth Stencil (0-255) usado SO nos componentes do
-	// drone. Mude se colidir com outro sistema do projeto que tambem use
-	// CustomStencil (ex: contorno de selecao/highlight) -- nesse caso esse
-	// outro objeto tambem apareceria branco na mascara, contaminando a
-	// bbox. Ligue bSaveMaskDebug pra conferir visualmente se a mascara sai
-	// limpa (so o drone, resto preto).
+	// drone. O material M_DroneMask2 so aceita EXATAMENTE 250 (valor fixo no
+	// grafo, ver ue_python/criar_material_mascara_v2.py) -- o antigo aceitava
+	// qualquer stencil >= limiar, e partes dos carros do CitySample (que tambem
+	// escrevem CustomStencil) entravam na mascara e esticavam a bbox. Se mudar
+	// este valor, mude o material junto. Ligue bSaveMaskDebug pra conferir
+	// visualmente se a mascara sai limpa (so o drone, resto preto).
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Mascara")
 	int32 MaskStencilValue = 250;
 
@@ -457,6 +480,11 @@ private:
 	// cantos) -- captura a mascara, le os pixels, e decide oclusao/bbox a
 	// partir do que realmente apareceu na imagem.
 	FPoseCheckResult CheckPoseFromMask(USceneCaptureComponent2D* MaskComp) const;
+
+	// Captura a mascara de novo com so o drone na cena e devolve quantos
+	// pixels a silhueta inteira ocupa (ver OcclusionCheckPixelCount).
+	// Sobrescreve o TextureTarget da mascara.
+	int32 CountUnoccludedDronePixels(USceneCaptureComponent2D* MaskComp) const;
 
 	// Salva a imagem crua da mascara pra conferencia visual (bSaveMaskDebug).
 	void ExportMaskDebug(USceneCaptureComponent2D* MaskComp, const FString& CamLabel, const FString& SampleKey) const;

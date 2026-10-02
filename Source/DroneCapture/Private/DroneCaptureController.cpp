@@ -407,11 +407,28 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 		}
 
 		MaskComp->CaptureScene();
-		const FPoseCheckResult Result = CheckPoseFromMask(MaskComp);
+		FPoseCheckResult Result = CheckPoseFromMask(MaskComp);
 
 		const FString CamLabel = FString::Printf(TEXT("CaptureCam%d"), i + 1);
 		const FString SampleKey = FString::FromInt(PoseIndex);
 		const int32 SupersampleFactor = CamCapture ? FMath::Max(1, CamCapture->SupersampleFactor) : 1;
+
+		// Antes da checagem de silhueta abaixo, que sobrescreve o alvo da mascara.
+		if (bSaveMaskDebug)
+		{
+			ExportMaskDebug(MaskComp, CamLabel, SampleKey);
+		}
+
+		// Poucos pixels visiveis: drone longe ou quase todo escondido? Compara
+		// com a silhueta inteira (ver OcclusionCheckPixelCount).
+		if (Result.Status == EPoseCheckStatus::Ok && MinVisibleFraction > 0.0f && Result.VisiblePixelCount < OcclusionCheckPixelCount)
+		{
+			const int32 FullPixelCount = CountUnoccludedDronePixels(MaskComp);
+			if (FullPixelCount > 0 && (float)Result.VisiblePixelCount < MinVisibleFraction * (float)FullPixelCount)
+			{
+				Result.Status = EPoseCheckStatus::PoucoVisivel;
+			}
+		}
 
 		// "Drone nao aparece pra essa camera" -- nenhum pixel da mascara
 		// detectado (oclusao total ou fora do campo de visao; a mascara nao
@@ -438,11 +455,6 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 				const FString Info = FString::Printf(TEXT("pose_index=%d ponto=%s yaw=%.1f"), PoseIndex, *Point.ToString(), PendingYawDeg);
 				ExportDiscardDebug(Reason, CamLabel, SampleKey, RgbComp, Info, SupersampleFactor);
 			}
-		}
-
-		if (bSaveMaskDebug)
-		{
-			ExportMaskDebug(MaskComp, CamLabel, SampleKey);
 		}
 	}
 
@@ -1030,7 +1042,35 @@ FPoseCheckResult ADroneCaptureController::CheckPoseFromMask(USceneCaptureCompone
 	Result.BboxMax = BboxMax;
 	Result.RtWidth = Width;
 	Result.RtHeight = Height;
+	Result.VisiblePixelCount = VisiblePixelCount;
 	return Result;
+}
+
+int32 ADroneCaptureController::CountUnoccludedDronePixels(USceneCaptureComponent2D* MaskComp) const
+{
+	if (!MaskComp || !MaskComp->TextureTarget || !Drone)
+	{
+		return 0;
+	}
+
+	// So o drone e desenhado nesta captura, entao nada o esconde e o gate de
+	// profundidade do M_DroneMask passa na silhueta inteira.
+	const ESceneCapturePrimitiveRenderMode SavedMode = MaskComp->PrimitiveRenderMode;
+	const TArray<TObjectPtr<AActor>> SavedShowOnly = MaskComp->ShowOnlyActors;
+	MaskComp->PrimitiveRenderMode = ESceneCapturePrimitiveRenderMode::PRM_UseShowOnlyList;
+	MaskComp->ShowOnlyActors.Reset();
+	MaskComp->ShowOnlyActors.Add(Drone);
+
+	MaskComp->CaptureScene();
+	FlushRenderingCommands();
+
+	MaskComp->PrimitiveRenderMode = SavedMode;
+	MaskComp->ShowOnlyActors = SavedShowOnly;
+
+	FVector2D BboxMin, BboxMax;
+	int32 PixelCount = 0;
+	ComputeMaskBbox(MaskComp->TextureTarget, BboxMin, BboxMax, PixelCount);
+	return PixelCount;
 }
 
 // ============================================================
@@ -1241,6 +1281,7 @@ FString ADroneCaptureController::StatusToReasonString(EPoseCheckStatus Status)
 	case EPoseCheckStatus::BboxPequena: return TEXT("bbox_pequena");
 	case EPoseCheckStatus::BboxNaBorda: return TEXT("bbox_na_borda");
 	case EPoseCheckStatus::BboxMuitoGrande: return TEXT("bbox_muito_grande");
+	case EPoseCheckStatus::PoucoVisivel: return TEXT("pouco_visivel");
 	default: return TEXT("ok");
 	}
 }
