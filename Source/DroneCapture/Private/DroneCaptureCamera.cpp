@@ -129,7 +129,11 @@ void ADroneCaptureCamera::CreateRenderTarget()
 	const int32 Factor = FMath::Max(1, SupersampleFactor);
 
 	UTextureRenderTarget2D* RT = NewObject<UTextureRenderTarget2D>(this);
-	RT->RenderTargetFormat = RTF_RGBA8;
+	// _SRGB: com RTF_RGBA8 a captura gravava os bytes em espaco LINEAR e o
+	// controller os lia como sRGB (FLinearColor(FColor) decodifica sRGB), o que
+	// aplicava um gama 2,2 a mais na imagem salva: tudo mais escuro, sombra
+	// esmagada e cor saturada em relacao ao viewport.
+	RT->RenderTargetFormat = RTF_RGBA8_SRGB;
 	RT->ClearColor = FLinearColor::Black;
 	RT->bAutoGenerateMips = false;
 	RT->InitAutoFormat(RtWidth * Factor, RtHeight * Factor);
