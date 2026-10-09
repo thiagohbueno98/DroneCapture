@@ -54,6 +54,15 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Drone Capture")
 	bool bForceLumen = false;
 
+	// Desliga o antialiasing do motor (TAA/TSR/FXAA) na captura RGB e deixa so
+	// o SupersampleFactor fazer o papel de AA. Com os dois juntos a borda do
+	// drone sai suavizada duas vezes. Pensado pra usar com SupersampleFactor
+	// 3 ou 4. DESLIGADO por padrao (em teste A/B desde 2026-10-09): materiais
+	// com dither (folhagem, transicao de LOD) contam com o TAA pra nao
+	// granular.
+	UPROPERTY(EditAnywhere, Category = "Drone Capture")
+	bool bDisableEngineAntiAliasing = false;
+
 	// Segunda captura, so pra mascara de segmentacao do drone (ver
 	// ADroneCaptureController::CheckPoseFromMask) -- acha oclusao/bbox a
 	// partir dos pixels de verdade em vez de raycast+projecao geometrica.

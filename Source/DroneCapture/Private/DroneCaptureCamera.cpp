@@ -142,6 +142,8 @@ void ADroneCaptureCamera::CreateRenderTarget()
 	Comp->TextureTarget = RT;
 	Comp->bIgnoreScreenPercentage = true;
 	Comp->bAlwaysPersistRenderingState = true;
+	Comp->ShowFlags.SetTemporalAA(!bDisableEngineAntiAliasing);
+	Comp->ShowFlags.SetAntiAliasing(!bDisableEngineAntiAliasing);
 
 	if (MaskCaptureComponent)
 	{
