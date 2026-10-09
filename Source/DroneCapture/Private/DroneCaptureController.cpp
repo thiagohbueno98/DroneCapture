@@ -25,7 +25,8 @@
 #include "Blueprint/UserWidget.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
-#include "Camera/PlayerCameraManager.h"
+#include "Camera/CameraActor.h"
+#include "Camera/CameraComponent.h"
 #include "Engine/LevelStreaming.h"
 #include "Engine/Engine.h"
 #include "HAL/PlatformTime.h"
@@ -164,6 +165,8 @@ void ADroneCaptureController::BeginPlay()
 		// Resolve a cena ANTES do menu -- o widget precisa de uma
 		// referencia valida de Drone pra aplicar o modelo escolhido.
 		ResolveSceneReferences();
+		// Ja nasce olhando pela camera de captura (em vez de so no Start).
+		SetPlayerViewToCamera(0);
 		ShowSetupMenu();
 	}
 	else if (bAutoStartOnBeginPlay)
@@ -281,24 +284,56 @@ void ADroneCaptureController::StopCapture()
 
 void ADroneCaptureController::SetPlayerViewToCamera(int32 CameraIdx)
 {
-	APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	UWorld* World = GetWorld();
+	APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
 	AActor* CamActor = Cameras.IsValidIndex(CameraIdx) ? Cameras[CameraIdx] : nullptr;
 	if (!bMatchPlayerViewToCaptureCamera || !PC || !CamActor)
 	{
 		return;
 	}
 
-	PC->SetViewTarget(CamActor);
-	bPlayerViewMovedByCapture = true;
+	// A vista vai pra um ACameraActor auxiliar, nao direto pra camera de
+	// captura (ASceneCapture2D): camera manager de projeto (City Sample) so
+	// respeita posicao E rotacao do alvo quando ele e um ACameraActor -- com
+	// outro tipo de ator ele aplica o modo de camera do jogo (terceira pessoa
+	// girando com o mouse em volta do alvo).
+	if (!PlayerViewCamera)
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+		SpawnParams.ObjectFlags |= RF_Transient;
+		PlayerViewCamera = World->SpawnActor<ACameraActor>(ACameraActor::StaticClass(), CamActor->GetActorTransform(), SpawnParams);
+		if (!PlayerViewCamera)
+		{
+			return;
+		}
+	}
 
-	if (PC->PlayerCameraManager)
+	const USceneCaptureComponent2D* RgbComp = CameraComponents.IsValidIndex(CameraIdx) ? CameraComponents[CameraIdx] : nullptr;
+	const FTransform ViewTransform = RgbComp ? RgbComp->GetComponentTransform() : CamActor->GetActorTransform();
+	PlayerViewCamera->SetActorLocationAndRotation(ViewTransform.GetLocation(), ViewTransform.GetRotation());
+
+	if (UCameraComponent* ViewComp = PlayerViewCamera->GetCameraComponent())
 	{
 		// Um pouco mais aberto que a captura: a janela do jogo pode ter outra
 		// proporcao, e o reflexo so existe dentro do campo da vista principal.
-		const USceneCaptureComponent2D* RgbComp = CameraComponents.IsValidIndex(CameraIdx) ? CameraComponents[CameraIdx] : nullptr;
 		const float CaptureFov = RgbComp ? RgbComp->FOVAngle : 90.0f;
-		PC->PlayerCameraManager->SetFOV(FMath::Min(CaptureFov + PlayerViewExtraFovDeg, 170.0f));
+		ViewComp->SetFieldOfView(FMath::Min(CaptureFov + PlayerViewExtraFovDeg, 170.0f));
+		ViewComp->SetConstraintAspectRatio(false);
 	}
+
+	if (PC->GetViewTarget() != PlayerViewCamera)
+	{
+		PC->SetViewTarget(PlayerViewCamera);
+	}
+
+	if (!bPlayerViewMovedByCapture)
+	{
+		bPlayerViewMovedByCapture = true;
+		PC->SetIgnoreMoveInput(true);
+		PC->SetIgnoreLookInput(true);
+	}
+	PlayerViewCameraIndex = CameraIdx;
 }
 
 void ADroneCaptureController::RestorePlayerView()
@@ -309,18 +344,20 @@ void ADroneCaptureController::RestorePlayerView()
 	}
 	bPlayerViewMovedByCapture = false;
 
-	APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
-	if (!PC)
+	if (APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr)
 	{
-		return;
+		PC->SetIgnoreMoveInput(false);
+		PC->SetIgnoreLookInput(false);
+		if (APawn* Pawn = PC->GetPawn())
+		{
+			PC->SetViewTarget(Pawn);
+		}
 	}
-	if (PC->PlayerCameraManager)
+
+	if (PlayerViewCamera)
 	{
-		PC->PlayerCameraManager->UnlockFOV();
-	}
-	if (APawn* Pawn = PC->GetPawn())
-	{
-		PC->SetViewTarget(Pawn);
+		PlayerViewCamera->Destroy();
+		PlayerViewCamera = nullptr;
 	}
 }
 
@@ -455,6 +492,14 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 	Super::Tick(DeltaSeconds);
 
 	SpinPropellers(DeltaSeconds);
+
+	// O jogo pode possuir o personagem DEPOIS do nosso BeginPlay e puxar a
+	// vista de volta pra ele (City Sample) -- reafirma enquanto a vista for
+	// nossa.
+	if (bPlayerViewMovedByCapture)
+	{
+		SetPlayerViewToCamera(PlayerViewCameraIndex);
+	}
 
 	if (bWaitingForLevelLoad)
 	{

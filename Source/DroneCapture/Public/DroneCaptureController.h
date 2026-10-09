@@ -6,6 +6,8 @@
 #include "DroneCaptureTarget.h"
 #include "DroneCaptureController.generated.h"
 
+class ACameraActor;
+
 class USceneCaptureComponent2D;
 class UDroneCaptureSetupWidget;
 class UTextureRenderTarget2D;
@@ -277,8 +279,8 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Capture")
 	bool bDisableViewportRenderingWhileCapturing = false;
 
-	// Durante a captura, poe a vista do jogador (a janela do jogo) na propria
-	// camera de captura. Reflexo planar (APlanarReflection -- lago e fonte do
+	// Desde o BeginPlay ate o fim da rodada, poe a vista do jogador (a janela
+	// do jogo) na propria camera de captura e ignora mouse/movimento. Reflexo planar (APlanarReflection -- lago e fonte do
 	// Park) e renderizado so pra vista PRINCIPAL e a captura reaproveita o
 	// resultado: com o jogador em outro lugar ou olhando pra outro lado o
 	// reflexo saia errado ou sumia, mudando de uma rodada pra outra e ate no
@@ -504,7 +506,12 @@ private:
 	void RestorePlayerView();
 	int32 GetWarmupFrameCount() const;
 	int32 ActiveCameraIndex = 0;
+	int32 PlayerViewCameraIndex = 0;
 	bool bPlayerViewMovedByCapture = false;
+
+	// Camera auxiliar que recebe a vista do jogador (ver SetPlayerViewToCamera).
+	UPROPERTY(Transient)
+	TObjectPtr<ACameraActor> PlayerViewCamera = nullptr;
 
 	// Tempo acumulado por etapa da rodada -- gravado em <dataset>/tempos.txt
 	// e no log quando a rodada termina (WriteTimings).
