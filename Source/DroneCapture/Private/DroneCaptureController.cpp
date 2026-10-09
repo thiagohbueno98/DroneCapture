@@ -1028,21 +1028,6 @@ void ADroneCaptureController::ResolveSceneReferences()
 
 	ConfigureDroneMask();
 
-	// Ver bForceDroneLod0. ForcedLodModel e 1-based (0 = automatico).
-	for (UActorComponent* ActorComp : Drone->GetComponents())
-	{
-		if (UStaticMeshComponent* Mesh = Cast<UStaticMeshComponent>(ActorComp))
-		{
-			Mesh->SetForcedLodModel(bForceDroneLod0 ? 1 : 0);
-			if (bForceDroneLod0 && Mesh->GetStaticMesh())
-			{
-				UE_LOG(LogTemp, Log, TEXT("[DroneCapture] LOD0 forcado em %s (%s, %d LODs%s)."),
-					*Mesh->GetName(), *Mesh->GetStaticMesh()->GetName(), Mesh->GetStaticMesh()->GetNumLODs(),
-					Mesh->GetStaticMesh()->IsNaniteEnabled() ? TEXT(", Nanite: sem efeito") : TEXT(""));
-			}
-		}
-	}
-
 	// Aquecimento do shader do M_DroneMask -- achado rodando o dataset de
 	// verdade pela primeira vez: a PRIMEIRA CaptureScene() de cada
 	// MaskComponent, logo no inicio do Play, pode cair num frame onde o

@@ -10,7 +10,7 @@ class USceneCaptureComponent2D;
  * Camera de captura pronta pra uso -- traducao nativa de
  * setup_cena.py::configure_camera()/create_or_get_render_target(). Cria o
  * proprio Render Target em runtime (sem salvar asset nenhum no Content
- * Browser) e aplica todos os overrides de pos-processo/Lumen/exposicao
+ * Browser) e aplica todos os overrides de pos-processo/exposicao
  * validados no fluxo Python. So arrastar no nivel, posicionar, e setar
  * CameraIndex (1,2,3...) -- sem precisar de Tag manual.
  */
@@ -45,23 +45,6 @@ public:
 	// ruido/serrilhado e deixa a imagem mais "natural".
 	UPROPERTY(EditAnywhere, Category = "Drone Capture", meta = (ClampMin = "1", ClampMax = "4"))
 	int32 SupersampleFactor = 2;
-
-	// Forca GI e reflexo por Lumen na captura RGB. DESLIGADO por padrao: sem o
-	// override a captura segue o metodo do projeto. Testado em 2026-10-09: no
-	// City Sample (projeto ja usa Lumen) a imagem sai igual com ou sem; no
-	// Park (lightmaps + SSR, vindo do UE4) o Lumen forcado ignora os lightmaps,
-	// escurece tronco/sombra e deixa a captura ~6% mais lenta.
-	UPROPERTY(EditAnywhere, Category = "Drone Capture")
-	bool bForceLumen = false;
-
-	// Desliga o antialiasing do motor (TAA/TSR/FXAA) na captura RGB e deixa so
-	// o SupersampleFactor fazer o papel de AA. Com os dois juntos a borda do
-	// drone sai suavizada duas vezes. Pensado pra usar com SupersampleFactor
-	// 3 ou 4. DESLIGADO por padrao (em teste A/B desde 2026-10-09): materiais
-	// com dither (folhagem, transicao de LOD) contam com o TAA pra nao
-	// granular.
-	UPROPERTY(EditAnywhere, Category = "Drone Capture")
-	bool bDisableEngineAntiAliasing = false;
 
 	// Segunda captura, so pra mascara de segmentacao do drone (ver
 	// ADroneCaptureController::CheckPoseFromMask) -- acha oclusao/bbox a

@@ -142,8 +142,6 @@ void ADroneCaptureCamera::CreateRenderTarget()
 	Comp->TextureTarget = RT;
 	Comp->bIgnoreScreenPercentage = true;
 	Comp->bAlwaysPersistRenderingState = true;
-	Comp->ShowFlags.SetTemporalAA(!bDisableEngineAntiAliasing);
-	Comp->ShowFlags.SetAntiAliasing(!bDisableEngineAntiAliasing);
 
 	if (MaskCaptureComponent)
 	{
@@ -170,15 +168,9 @@ void ADroneCaptureCamera::ConfigurePostProcess()
 
 	FPostProcessSettings& Pps = Comp->PostProcessSettings;
 
-	// Sem override (bForceLumen=false, o padrao) vale o metodo de GI/reflexo
-	// do projeto -- ver o comentario de bForceLumen no header.
-	Pps.bOverride_DynamicGlobalIlluminationMethod = bForceLumen;
-	Pps.bOverride_ReflectionMethod = bForceLumen;
-	if (bForceLumen)
-	{
-		Pps.DynamicGlobalIlluminationMethod = EDynamicGlobalIlluminationMethod::Lumen;
-		Pps.ReflectionMethod = EReflectionMethod::Lumen;
-	}
+	// GI e reflexo ficam no metodo do projeto, sem override. Lumen forcado
+	// nao muda nada no City Sample (ja usa Lumen) e piora o Park (ignora os
+	// lightmaps, escurece tronco/sombra, ~6% mais lento).
 
 	// Auto exposure precisa de tempo real passando entre frames pra
 	// convergir -- forcar velocidade maxima faz isso quase instantaneo.

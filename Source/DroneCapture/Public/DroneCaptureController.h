@@ -342,15 +342,6 @@ public:
 	// (referencia certa do mundo de Play).
 	// ------------------------------------------------------------------
 
-	// Trava todas as malhas do drone no LOD0. Sem isso o motor troca pela
-	// malha simplificada quando o drone fica pequeno na tela e a silhueta
-	// perde bracos/helices -- justo nos drones distantes. A trava vale pra
-	// todas as cameras (o LOD e escolhido por componente). Malha Nanite
-	// ignora (tem LOD proprio por cluster). DESLIGADO por padrao (em teste
-	// A/B desde 2026-10-09).
-	UPROPERTY(EditAnywhere, Category = "Drone Capture")
-	bool bForceDroneLod0 = false;
-
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Helices")
 	bool bSpinPropellers = true;
 
