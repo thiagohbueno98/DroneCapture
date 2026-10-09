@@ -168,9 +168,8 @@ void ADroneCaptureCamera::ConfigurePostProcess()
 
 	FPostProcessSettings& Pps = Comp->PostProcessSettings;
 
-	// SceneCaptureComponent2D desliga Lumen (GI + reflexos) por padrao --
-	// sem isso a imagem sai bem mais "chapada"/lavada que o viewport.
-	// bForceLumen=false: sem override, vale o metodo do projeto (ver header).
+	// Sem override (bForceLumen=false, o padrao) vale o metodo de GI/reflexo
+	// do projeto -- ver o comentario de bForceLumen no header.
 	Pps.bOverride_DynamicGlobalIlluminationMethod = bForceLumen;
 	Pps.bOverride_ReflectionMethod = bForceLumen;
 	if (bForceLumen)
