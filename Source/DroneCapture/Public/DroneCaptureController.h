@@ -277,6 +277,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Capture")
 	bool bDisableViewportRenderingWhileCapturing = false;
 
+	// Durante a captura, poe a vista do jogador (a janela do jogo) na propria
+	// camera de captura. Reflexo planar (APlanarReflection -- lago e fonte do
+	// Park) e renderizado so pra vista PRINCIPAL e a captura reaproveita o
+	// resultado: com o jogador em outro lugar ou olhando pra outro lado o
+	// reflexo saia errado ou sumia, mudando de uma rodada pra outra e ate no
+	// meio da rodada (medido em 2026-10-09, testes sem_mexer x mexendo).
+	// Com mais de uma camera elas passam a ser capturadas uma por vez, cada
+	// uma com o proprio aquecimento. Nao combina com
+	// bDisableViewportRenderingWhileCapturing.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Capture")
+	bool bMatchPlayerViewToCaptureCamera = true;
+
+	// Folga somada ao FOV da captura na vista do jogador (ver acima).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Capture", meta = (ClampMin = "0.0", ClampMax = "40.0", EditCondition = "bMatchPlayerViewToCaptureCamera"))
+	float PlayerViewExtraFovDeg = 10.0f;
+
 	// ------------------------------------------------------------------
 	// Espera de carregamento do mapa -- achado rodando city1 (2026-09-23):
 	// as primeiras poses saiam com carros/trafego ainda nao renderizados
@@ -482,6 +498,13 @@ private:
 	// podem terminar depois do ator.
 	TSharedRef<FThreadSafeCounter, ESPMode::ThreadSafe> PendingImageWrites = MakeShared<FThreadSafeCounter, ESPMode::ThreadSafe>();
 	void WaitForPendingImageWrites() const;
+
+	// Ver bMatchPlayerViewToCaptureCamera.
+	void SetPlayerViewToCamera(int32 CameraIdx);
+	void RestorePlayerView();
+	int32 GetWarmupFrameCount() const;
+	int32 ActiveCameraIndex = 0;
+	bool bPlayerViewMovedByCapture = false;
 
 	// Tempo acumulado por etapa da rodada -- gravado em <dataset>/tempos.txt
 	// e no log quando a rodada termina (WriteTimings).

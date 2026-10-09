@@ -25,6 +25,7 @@
 #include "Blueprint/UserWidget.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
+#include "Camera/PlayerCameraManager.h"
 #include "Engine/LevelStreaming.h"
 #include "Engine/Engine.h"
 #include "HAL/PlatformTime.h"
@@ -275,6 +276,52 @@ void ADroneCaptureController::StopCapture()
 	bIsRunning = false;
 	bWaitingForLevelLoad = false;
 	SetGameViewportWorldRendering(true);
+	RestorePlayerView();
+}
+
+void ADroneCaptureController::SetPlayerViewToCamera(int32 CameraIdx)
+{
+	APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	AActor* CamActor = Cameras.IsValidIndex(CameraIdx) ? Cameras[CameraIdx] : nullptr;
+	if (!bMatchPlayerViewToCaptureCamera || !PC || !CamActor)
+	{
+		return;
+	}
+
+	PC->SetViewTarget(CamActor);
+	bPlayerViewMovedByCapture = true;
+
+	if (PC->PlayerCameraManager)
+	{
+		// Um pouco mais aberto que a captura: a janela do jogo pode ter outra
+		// proporcao, e o reflexo so existe dentro do campo da vista principal.
+		const USceneCaptureComponent2D* RgbComp = CameraComponents.IsValidIndex(CameraIdx) ? CameraComponents[CameraIdx] : nullptr;
+		const float CaptureFov = RgbComp ? RgbComp->FOVAngle : 90.0f;
+		PC->PlayerCameraManager->SetFOV(FMath::Min(CaptureFov + PlayerViewExtraFovDeg, 170.0f));
+	}
+}
+
+void ADroneCaptureController::RestorePlayerView()
+{
+	if (!bPlayerViewMovedByCapture)
+	{
+		return;
+	}
+	bPlayerViewMovedByCapture = false;
+
+	APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+	if (!PC)
+	{
+		return;
+	}
+	if (PC->PlayerCameraManager)
+	{
+		PC->PlayerCameraManager->UnlockFOV();
+	}
+	if (APawn* Pawn = PC->GetPawn())
+	{
+		PC->SetViewTarget(Pawn);
+	}
 }
 
 void ADroneCaptureController::SetGameViewportWorldRendering(bool bEnabled)
@@ -446,6 +493,7 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 	{
 		bIsRunning = false;
 		SetGameViewportWorldRendering(true);
+		RestorePlayerView();
 		WaitForPendingImageWrites();
 		WriteDataYaml();
 		WriteTimings();
@@ -480,7 +528,13 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 		Drone->SetActorRotation(FRotator(0.0f, Yaw, 0.0f));
 		PendingYawDeg = Yaw;
 
-		WarmupFramesLeft = FMath::Max(WarmupCaptures, 1);
+		// Vista do jogador na camera de captura (ver
+		// bMatchPlayerViewToCaptureCamera): com isso ligado as cameras sao
+		// processadas UMA POR VEZ, cada uma com o proprio aquecimento.
+		ActiveCameraIndex = 0;
+		SetPlayerViewToCamera(ActiveCameraIndex);
+
+		WarmupFramesLeft = GetWarmupFrameCount();
 		PoseStartSeconds = FPlatformTime::Seconds();
 		return; // deixa os proximos Ticks (reais) acumularem o historico temporal
 	}
@@ -493,6 +547,10 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 	{
 		for (int32 i = 0; i < Cameras.Num(); ++i)
 		{
+			if (bMatchPlayerViewToCaptureCamera && i != ActiveCameraIndex)
+			{
+				continue;
+			}
 			if (USceneCaptureComponent2D* RgbComp = CameraComponents.IsValidIndex(i) ? CameraComponents[i] : nullptr)
 			{
 				RgbComp->CaptureScene();
@@ -527,13 +585,17 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 	// Aquecimento medido em tempo de parede (inclui o frame inteiro do jogo:
 	// CaptureScene() so enfileira, o custo de GPU aparece no tempo do frame).
 	Timings.WarmupSec += FPlatformTime::Seconds() - PoseStartSeconds;
-	Timings.Poses++;
 
 	PendingBlurredRgbPixels.Reset();
 
 	const FVector Point = GridPoints[PointIndex];
 	for (int32 i = 0; i < Cameras.Num(); ++i)
 	{
+		if (bMatchPlayerViewToCaptureCamera && i != ActiveCameraIndex)
+		{
+			continue;
+		}
+
 		AActor* CamActor = Cameras[i];
 		USceneCaptureComponent2D* RgbComp = CameraComponents.IsValidIndex(i) ? CameraComponents[i] : nullptr;
 		const ADroneCaptureCamera* CamCapture = Cast<ADroneCaptureCamera>(CamActor);
@@ -615,8 +677,28 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 		Timings.ExportSec += FPlatformTime::Seconds() - ExportStartSeconds;
 	}
 
+	// Proxima camera da MESMA pose: troca a vista do jogador e aquece de novo
+	// (o drone nao se mexe).
+	if (bMatchPlayerViewToCaptureCamera && ActiveCameraIndex + 1 < Cameras.Num())
+	{
+		ActiveCameraIndex++;
+		SetPlayerViewToCamera(ActiveCameraIndex);
+		WarmupFramesLeft = GetWarmupFrameCount();
+		PoseStartSeconds = FPlatformTime::Seconds();
+		return;
+	}
+
+	Timings.Poses++;
 	WarmupFramesLeft = -1;
 	PoseIndex++;
+}
+
+int32 ADroneCaptureController::GetWarmupFrameCount() const
+{
+	// Com a vista do jogador seguindo a camera, o reflexo planar que a
+	// captura enxerga e o do frame ANTERIOR da vista principal: precisa de
+	// pelo menos 2 frames depois da troca de vista.
+	return FMath::Max(WarmupCaptures, bMatchPlayerViewToCaptureCamera ? 2 : 1);
 }
 
 // ============================================================
