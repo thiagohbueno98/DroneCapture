@@ -30,6 +30,11 @@
 #include "HAL/PlatformTime.h"
 #include "HAL/IConsoleManager.h"
 #include "WorldPartition/WorldPartitionSubsystem.h"
+#include "Async/Async.h"
+#include "Async/ParallelFor.h"
+#include "Engine/GameViewportClient.h"
+#include "HAL/PlatformProcess.h"
+#include "Modules/ModuleManager.h"
 
 namespace DroneCaptureInternal
 {
@@ -75,6 +80,56 @@ namespace DroneCaptureInternal
 			return FString::Printf(TEXT("%dh%02dm"), H, M);
 		}
 		return FString::Printf(TEXT("%dm%02ds"), M, S);
+	}
+
+	// Limite de imagens esperando compressao/gravacao em background (ver
+	// ExportCaptureToPng). Cada uma segura o buffer bruto (~33 MB em 4K).
+	static constexpr int32 MaxPendingImageWrites = 8;
+
+	// Roda fora da game thread. Factor > 1: reduz por "box filter" em espaco
+	// LINEAR (FLinearColor a partir de FColor ja converte sRGB->linear) -- a
+	// media dos Factor x Factor texels de cada pixel final, convertida de
+	// volta pra sRGB so no fim. E isso (e nao um redimensionamento bilinear de
+	// 1 amostra) que reduz ruido/serrilhado, mesma ideia de SSAA.
+	static void DownsampleAndSavePng(const TArray<FColor>& SrcPixels, int32 SrcWidth, int32 SrcHeight, int32 Factor, const FString& FilePath)
+	{
+		TArray64<uint8> CompressedPng;
+		if (Factor <= 1)
+		{
+			FImageUtils::PNGCompressImageArray(SrcWidth, SrcHeight, TArrayView64<const FColor>(SrcPixels.GetData(), SrcPixels.Num()), CompressedPng);
+		}
+		else
+		{
+			const int32 DstWidth = SrcWidth / Factor;
+			const int32 DstHeight = SrcHeight / Factor;
+
+			TArray<FColor> DstPixels;
+			DstPixels.SetNumUninitialized(DstWidth * DstHeight);
+
+			const float InvSampleCount = 1.0f / (float)(Factor * Factor);
+			for (int32 DstY = 0; DstY < DstHeight; ++DstY)
+			{
+				const int32 SrcY0 = DstY * Factor;
+				for (int32 DstX = 0; DstX < DstWidth; ++DstX)
+				{
+					const int32 SrcX0 = DstX * Factor;
+					FLinearColor Sum = FLinearColor::Black;
+					for (int32 SubY = 0; SubY < Factor; ++SubY)
+					{
+						const int32 RowOffset = (SrcY0 + SubY) * SrcWidth;
+						for (int32 SubX = 0; SubX < Factor; ++SubX)
+						{
+							Sum += FLinearColor(SrcPixels[RowOffset + SrcX0 + SubX]);
+						}
+					}
+					DstPixels[DstY * DstWidth + DstX] = (Sum * InvSampleCount).ToFColor(true);
+				}
+			}
+
+			FImageUtils::PNGCompressImageArray(DstWidth, DstHeight, TArrayView64<const FColor>(DstPixels.GetData(), DstPixels.Num()), CompressedPng);
+		}
+
+		FFileHelper::SaveArrayToFile(TArrayView64<const uint8>(CompressedPng.GetData(), CompressedPng.Num()), *FilePath);
 	}
 }
 
@@ -173,7 +228,12 @@ void ADroneCaptureController::StartCapture()
 	ResolveSceneReferences();
 	BuildGridPoints();
 
+	// PNGCompressImageArray roda em background (ver ExportCaptureToPng) e
+	// modulo so pode ser carregado na game thread.
+	FModuleManager::Get().LoadModuleChecked(TEXT("ImageWrapper"));
+
 	PoseIndex = 0;
+	Timings = FCaptureTimings();
 	WarmupFramesLeft = -1;
 	DiscardCountByReason.Reset();
 	bWaitingForLevelLoad = false;
@@ -204,6 +264,7 @@ void ADroneCaptureController::StartCapture()
 	}
 
 	bIsRunning = true;
+	SetGameViewportWorldRendering(false);
 	CaptureStartTimeSeconds = FPlatformTime::Seconds();
 	UE_LOG(LogTemp, Log, TEXT("[DroneCapture] Iniciando: %d posicoes x %d yaws x %d cameras = %d checagens."),
 		GridPoints.Num(), YawCount, Cameras.Num(), GridPoints.Num() * YawCount * Cameras.Num());
@@ -213,6 +274,69 @@ void ADroneCaptureController::StopCapture()
 {
 	bIsRunning = false;
 	bWaitingForLevelLoad = false;
+	SetGameViewportWorldRendering(true);
+}
+
+void ADroneCaptureController::SetGameViewportWorldRendering(bool bEnabled)
+{
+	UGameViewportClient* ViewportClient = GetWorld() ? GetWorld()->GetGameViewport() : nullptr;
+	if (!ViewportClient)
+	{
+		return;
+	}
+
+	if (!bEnabled)
+	{
+		if (bDisableViewportRenderingWhileCapturing && !ViewportClient->bDisableWorldRendering)
+		{
+			ViewportClient->bDisableWorldRendering = true;
+			bViewportRenderingDisabledByCapture = true;
+		}
+	}
+	else if (bViewportRenderingDisabledByCapture)
+	{
+		ViewportClient->bDisableWorldRendering = false;
+		bViewportRenderingDisabledByCapture = false;
+	}
+}
+
+void ADroneCaptureController::WriteTimings() const
+{
+	if (Timings.Poses <= 0)
+	{
+		return;
+	}
+
+	const double TotalSec = FPlatformTime::Seconds() - CaptureStartTimeSeconds;
+	const double PerPoseMs = 1000.0 / (double)Timings.Poses;
+	const double MeasuredSec = Timings.WarmupSec + Timings.BlurRenderSec + Timings.BlurReadbackSec + Timings.BlurCpuSec + Timings.MaskSec + Timings.ExportSec;
+
+	FString Text;
+	Text += FString::Printf(TEXT("poses=%d imagens_salvas=%d cameras=%d total=%.1fs (%.0f ms/pose)\n"), Timings.Poses, Timings.Saved, Cameras.Num(), TotalSec, TotalSec * PerPoseMs);
+	Text += FString::Printf(TEXT("WarmupCaptures=%d PropellerBlurSamples=%d\n"), WarmupCaptures, PropellerBlurSamples);
+	Text += TEXT("etapa: total_s | ms_por_pose | %% do total\n");
+	const auto AddLine = [&Text, PerPoseMs, TotalSec](const TCHAR* Name, double Sec)
+	{
+		Text += FString::Printf(TEXT("%s: %.1f | %.0f | %.0f%%\n"), Name, Sec, Sec * PerPoseMs, TotalSec > 0.0 ? 100.0 * Sec / TotalSec : 0.0);
+	};
+	AddLine(TEXT("aquecimento (frames do jogo)"), Timings.WarmupSec);
+	AddLine(TEXT("blur helice - render"), Timings.BlurRenderSec);
+	AddLine(TEXT("blur helice - leitura GPU"), Timings.BlurReadbackSec);
+	AddLine(TEXT("blur helice - media na CPU"), Timings.BlurCpuSec);
+	AddLine(TEXT("mascara + checagem"), Timings.MaskSec);
+	AddLine(TEXT("exportacao (game thread)"), Timings.ExportSec);
+	AddLine(TEXT("resto (frame da fase 1 etc.)"), TotalSec - MeasuredSec);
+
+	UE_LOG(LogTemp, Log, TEXT("[DroneCapture] Tempos da rodada:\n%s"), *Text);
+	FFileHelper::SaveStringToFile(Text, *FPaths::Combine(GetEffectiveOutputDir(), TEXT("tempos.txt")));
+}
+
+void ADroneCaptureController::WaitForPendingImageWrites() const
+{
+	while (PendingImageWrites->GetValue() > 0)
+	{
+		FPlatformProcess::Sleep(0.005f);
+	}
 }
 
 bool ADroneCaptureController::IsLevelStreamingComplete() const
@@ -303,6 +427,7 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 		{
 			bWaitingForLevelLoad = false;
 			bIsRunning = true;
+			SetGameViewportWorldRendering(false);
 			CaptureStartTimeSeconds = FPlatformTime::Seconds();
 			UE_LOG(LogTemp, Log, TEXT("[DroneCapture] Mapa carregado (%.0fs de espera) -- iniciando captura."), LevelLoadElapsedSeconds);
 		}
@@ -320,7 +445,10 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 	if (PoseIndex >= Total)
 	{
 		bIsRunning = false;
+		SetGameViewportWorldRendering(true);
+		WaitForPendingImageWrites();
 		WriteDataYaml();
+		WriteTimings();
 		if (GEngine)
 		{
 			GEngine->AddOnScreenDebugMessage(DroneCaptureInternal::OnScreenKeyProgress, 6.0f, FColor::Green,
@@ -353,6 +481,7 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 		PendingYawDeg = Yaw;
 
 		WarmupFramesLeft = FMath::Max(WarmupCaptures, 1);
+		PoseStartSeconds = FPlatformTime::Seconds();
 		return; // deixa os proximos Ticks (reais) acumularem o historico temporal
 	}
 
@@ -391,8 +520,16 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 	// preenchido pelo ultimo CaptureScene() da fase 2 (nenhum
 	// ExportSample/ExportDiscardDebug chama CaptureScene() de novo) -- a
 	// nao ser que o blur de helice esteja ligado, ver
-	// CapturePropellerMotionBlur/PendingBlurredRgbPixels.
-	CapturePropellerMotionBlur();
+	// CapturePropellerMotionBlur/PendingBlurredRgbPixels. O blur so e
+	// capturado DEPOIS da checagem da mascara e so pra camera que vai mesmo
+	// salvar a imagem: medido em 2026-10-09, ele era 2/3 do tempo da pose e
+	// era feito tambem nas poses descartadas (mais da metade delas).
+	// Aquecimento medido em tempo de parede (inclui o frame inteiro do jogo:
+	// CaptureScene() so enfileira, o custo de GPU aparece no tempo do frame).
+	Timings.WarmupSec += FPlatformTime::Seconds() - PoseStartSeconds;
+	Timings.Poses++;
+
+	PendingBlurredRgbPixels.Reset();
 
 	const FVector Point = GridPoints[PointIndex];
 	for (int32 i = 0; i < Cameras.Num(); ++i)
@@ -406,6 +543,7 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 			continue;
 		}
 
+		const double MaskStartSeconds = FPlatformTime::Seconds();
 		MaskComp->CaptureScene();
 		FPoseCheckResult Result = CheckPoseFromMask(MaskComp);
 
@@ -437,13 +575,30 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 		// qualidade, entao nao conta como negativo aqui).
 		const bool bDroneNotVisible = Result.Status == EPoseCheckStatus::Oclusao;
 
-		if (Result.Status == EPoseCheckStatus::Ok)
+		const bool bSaveSample = Result.Status == EPoseCheckStatus::Ok;
+		const bool bSaveNegative = !bSaveSample && bDroneNotVisible && bSaveNegativeSamples && FMath::FRand() < NegativeSampleChance;
+
+		Timings.MaskSec += FPlatformTime::Seconds() - MaskStartSeconds;
+
+		// A mascara acima ja foi capturada no angulo real da helice; o blur
+		// varre ate esse mesmo angulo e o restaura no fim, entao mascara e
+		// RGB continuam batendo.
+		if (bSaveSample || bSaveNegative)
+		{
+			CapturePropellerMotionBlur(RgbComp);
+		}
+
+		const double ExportStartSeconds = FPlatformTime::Seconds();
+
+		if (bSaveSample)
 		{
 			ExportSample(CamLabel, SampleKey, RgbComp, Result.BboxMin, Result.BboxMax, Result.RtWidth, Result.RtHeight, SupersampleFactor);
+			Timings.Saved++;
 		}
-		else if (bDroneNotVisible && bSaveNegativeSamples && FMath::FRand() < NegativeSampleChance)
+		else if (bSaveNegative)
 		{
 			ExportNegativeSample(CamLabel, SampleKey, RgbComp, SupersampleFactor);
+			Timings.Saved++;
 		}
 		else if (bSaveDiscardDebug)
 		{
@@ -456,6 +611,8 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 				ExportDiscardDebug(Reason, CamLabel, SampleKey, RgbComp, Info, SupersampleFactor);
 			}
 		}
+
+		Timings.ExportSec += FPlatformTime::Seconds() - ExportStartSeconds;
 	}
 
 	WarmupFramesLeft = -1;
@@ -549,74 +706,82 @@ void ADroneCaptureController::SetPropellerSpinAngle(float AngleDeg)
 	}
 }
 
-void ADroneCaptureController::CapturePropellerMotionBlur()
+void ADroneCaptureController::CapturePropellerMotionBlur(USceneCaptureComponent2D* RgbComp)
 {
-	PendingBlurredRgbPixels.Reset();
-
-	if (PropellerBlurSamples <= 1)
+	if (PropellerBlurSamples <= 1 || !RgbComp || !RgbComp->TextureTarget)
 	{
 		return;
 	}
 
-	for (USceneCaptureComponent2D* RgbComp : CameraComponents)
+	const int32 Width = RgbComp->TextureTarget->SizeX;
+	const int32 Height = RgbComp->TextureTarget->SizeY;
+	if (Width <= 0 || Height <= 0)
 	{
-		if (!RgbComp || !RgbComp->TextureTarget)
-		{
-			continue;
-		}
-
-		const int32 Width = RgbComp->TextureTarget->SizeX;
-		const int32 Height = RgbComp->TextureTarget->SizeY;
-		if (Width <= 0 || Height <= 0)
-		{
-			continue;
-		}
-
-		TArray<FLinearColor> Accum;
-		Accum.SetNumZeroed(Width * Height);
-
-		// Varre de "PropellerSpinAngleDeg - Sweep" ate "PropellerSpinAngleDeg"
-		// (a ULTIMA amostra bate exatamente com o angulo real final) -- box
-		// filter no tempo, mesma ideia do supersampling espacial em
-		// ExportCaptureToPng, so que aqui a media e entre FRAMES em vez de
-		// entre TEXELS.
-		for (int32 Sample = 0; Sample < PropellerBlurSamples; ++Sample)
-		{
-			const float T = (float)Sample / (float)(PropellerBlurSamples - 1);
-			SetPropellerSpinAngle(PropellerSpinAngleDeg - PropellerBlurSweepDeg * (1.0f - T));
-
-			RgbComp->CaptureScene();
-			FlushRenderingCommands();
-
-			FTextureRenderTargetResource* RTResource = RgbComp->TextureTarget->GameThread_GetRenderTargetResource();
-			TArray<FColor> SubFramePixels;
-			if (!RTResource || !RTResource->ReadPixels(SubFramePixels) || SubFramePixels.Num() != Accum.Num())
-			{
-				continue;
-			}
-			for (int32 PixelIdx = 0; PixelIdx < SubFramePixels.Num(); ++PixelIdx)
-			{
-				Accum[PixelIdx] += FLinearColor(SubFramePixels[PixelIdx]);
-			}
-		}
-
-		// A mascara (capturada logo depois, por camera, no loop principal do
-		// Tick) precisa bater com a ULTIMA posicao real da helice -- senao
-		// volta o bug de "ponta da pa fora da bbox" ja corrigido antes. O
-		// ultimo sample do loop acima ja deixa nesse angulo (T=1), mas
-		// reforca explicito aqui pra nao depender dessa ordem por acidente.
-		SetPropellerSpinAngle(PropellerSpinAngleDeg);
-
-		const float InvSamples = 1.0f / (float)PropellerBlurSamples;
-		TArray<FColor> Averaged;
-		Averaged.SetNumUninitialized(Accum.Num());
-		for (int32 PixelIdx = 0; PixelIdx < Accum.Num(); ++PixelIdx)
-		{
-			Averaged[PixelIdx] = (Accum[PixelIdx] * InvSamples).ToFColor(true);
-		}
-
-		PendingBlurredRgbPixels.Add(RgbComp, MoveTemp(Averaged));
+		return;
 	}
+
+	TArray<FLinearColor> Accum;
+	Accum.SetNumZeroed(Width * Height);
+
+	// Varre de "PropellerSpinAngleDeg - Sweep" ate "PropellerSpinAngleDeg"
+	// (a ULTIMA amostra bate exatamente com o angulo real final) -- box
+	// filter no tempo, mesma ideia do supersampling espacial em
+	// ExportCaptureToPng, so que aqui a media e entre FRAMES em vez de
+	// entre TEXELS.
+	for (int32 Sample = 0; Sample < PropellerBlurSamples; ++Sample)
+	{
+		const float T = (float)Sample / (float)(PropellerBlurSamples - 1);
+		SetPropellerSpinAngle(PropellerSpinAngleDeg - PropellerBlurSweepDeg * (1.0f - T));
+
+		const double RenderStartSeconds = FPlatformTime::Seconds();
+		RgbComp->CaptureScene();
+		FlushRenderingCommands();
+		const double ReadbackStartSeconds = FPlatformTime::Seconds();
+		Timings.BlurRenderSec += ReadbackStartSeconds - RenderStartSeconds;
+
+		FTextureRenderTargetResource* RTResource = RgbComp->TextureTarget->GameThread_GetRenderTargetResource();
+		TArray<FColor> SubFramePixels;
+		const bool bReadOk = RTResource && RTResource->ReadPixels(SubFramePixels) && SubFramePixels.Num() == Accum.Num();
+		const double AccumStartSeconds = FPlatformTime::Seconds();
+		Timings.BlurReadbackSec += AccumStartSeconds - ReadbackStartSeconds;
+		if (!bReadOk)
+		{
+			continue;
+		}
+		// Por linha em paralelo: cada pixel continua somando as amostras na
+		// mesma ordem, entao o resultado e identico ao do loop simples.
+		ParallelFor(Height, [&Accum, &SubFramePixels, Width](int32 Y)
+		{
+			const int32 RowOffset = Y * Width;
+			for (int32 X = 0; X < Width; ++X)
+			{
+				Accum[RowOffset + X] += FLinearColor(SubFramePixels[RowOffset + X]);
+			}
+		});
+		Timings.BlurCpuSec += FPlatformTime::Seconds() - AccumStartSeconds;
+	}
+
+	// A mascara (ja capturada antes, ver Tick) foi feita no angulo real da
+	// helice -- senao volta o bug de "ponta da pa fora da bbox" ja corrigido
+	// antes. O ultimo sample do loop acima ja deixa nesse angulo (T=1), mas
+	// reforca explicito aqui pra nao depender dessa ordem por acidente.
+	SetPropellerSpinAngle(PropellerSpinAngleDeg);
+
+	const double AverageStartSeconds = FPlatformTime::Seconds();
+	const float InvSamples = 1.0f / (float)PropellerBlurSamples;
+	TArray<FColor> Averaged;
+	Averaged.SetNumUninitialized(Accum.Num());
+	ParallelFor(Height, [&Accum, &Averaged, Width, InvSamples](int32 Y)
+	{
+		const int32 RowOffset = Y * Width;
+		for (int32 X = 0; X < Width; ++X)
+		{
+			Averaged[RowOffset + X] = (Accum[RowOffset + X] * InvSamples).ToFColor(true);
+		}
+	});
+	Timings.BlurCpuSec += FPlatformTime::Seconds() - AverageStartSeconds;
+
+	PendingBlurredRgbPixels.Add(RgbComp, MoveTemp(Averaged));
 }
 
 // ============================================================
@@ -711,13 +876,25 @@ void ADroneCaptureController::ResolveSceneReferences()
 	// aparecendo como uma bola flutuando nas imagens exportadas. Escondido
 	// explicitamente via HiddenActors, que funciona independente desse
 	// detalhe.
+	//
+	// Tem de valer tambem pra captura da MASCARA: escondida so no RGB, a
+	// esfera continuava entrando no SceneDepth da mascara e, com o Pawn perto
+	// da camera de captura, o gate de profundidade do M_DroneMask2 apagava o
+	// drone numa regiao inteira da tela -- pose descartada como "oclusao" com
+	// o drone totalmente visivel na imagem (teste5 no Park, 2026-10-09).
 	if (APawn* ObserverPawn = UGameplayStatics::GetPlayerPawn(World, 0))
 	{
-		for (USceneCaptureComponent2D* CamComp : CameraComponents)
+		for (int32 i = 0; i < CameraComponents.Num(); ++i)
 		{
-			if (CamComp)
+			if (USceneCaptureComponent2D* CamComp = CameraComponents[i])
 			{
 				CamComp->HiddenActors.AddUnique(ObserverPawn);
+			}
+
+			const ADroneCaptureCamera* CamCapture = Cameras.IsValidIndex(i) ? Cast<ADroneCaptureCamera>(Cameras[i]) : nullptr;
+			if (USceneCaptureComponent2D* MaskComp = CamCapture ? CamCapture->GetMaskCaptureComponent() : nullptr)
+			{
+				MaskComp->HiddenActors.AddUnique(ObserverPawn);
 			}
 		}
 	}
@@ -865,6 +1042,9 @@ void ADroneCaptureController::RestoreCVars()
 void ADroneCaptureController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	StopCapture();
+	// Imagens ainda na fila de gravacao em background seriam perdidas se o
+	// processo fechasse antes (Standalone Game).
+	WaitForPendingImageWrites();
 	RestoreCVars();
 	Super::EndPlay(EndPlayReason);
 }
@@ -1211,65 +1391,34 @@ void ADroneCaptureController::ExportCaptureToPng(USceneCaptureComponent2D* RgbCo
 		return;
 	}
 
-	if (SupersampleFactor <= 1)
-	{
-		// Sem supersample mas COM blur (cache preenchido): precisa compactar
-		// na unha -- o atalho ExportRenderTarget so le direto da GPU, nao de
-		// um buffer ja em memoria.
-		TArray64<uint8> CompressedPng;
-		FImageUtils::PNGCompressImageArray(SrcWidth, SrcHeight, TArrayView64<const FColor>(SrcPixels->GetData(), SrcPixels->Num()), CompressedPng);
-		IFileManager::Get().MakeDirectory(*OutDir, true);
-		const FString FilePath = FPaths::Combine(OutDir, FileName);
-		FFileHelper::SaveArrayToFile(TArrayView64<const uint8>(CompressedPng.GetData(), CompressedPng.Num()), *FilePath);
-		return;
-	}
-
-	// Supersampling ligado (ver ADroneCaptureCamera::SupersampleFactor): o
-	// TextureTarget foi renderizado SupersampleFactor vezes maior de
-	// proposito. Reduz aqui por "box filter" de verdade -- le os pixels
-	// brutos da GPU (ou o buffer ja mediado do blur, ver acima), converte
-	// cada um pra espaco LINEAR (FLinearColor a partir de FColor ja faz a
-	// conversao sRGB->linear), calcula a MEDIA dos SupersampleFactor x
-	// SupersampleFactor texels de cada pixel final, e so converte de volta
-	// pra sRGB no final. Fazer a media em espaco linear (em vez de so
-	// redimensionar a imagem grande com filtragem bilinear de 1 amostra) e
-	// o que de fato reduz ruido/serrilhado (mesma ideia de SSAA).
-	const int32 DstWidth = SrcWidth / SupersampleFactor;
-	const int32 DstHeight = SrcHeight / SupersampleFactor;
-	if (DstWidth <= 0 || DstHeight <= 0)
+	const int32 Factor = FMath::Max(1, SupersampleFactor);
+	if (SrcWidth / Factor <= 0 || SrcHeight / Factor <= 0)
 	{
 		return;
 	}
 
-	TArray<FColor> DstPixels;
-	DstPixels.SetNumUninitialized(DstWidth * DstHeight);
-
-	const float InvSampleCount = 1.0f / (float)(SupersampleFactor * SupersampleFactor);
-	for (int32 DstY = 0; DstY < DstHeight; ++DstY)
-	{
-		const int32 SrcY0 = DstY * SupersampleFactor;
-		for (int32 DstX = 0; DstX < DstWidth; ++DstX)
-		{
-			const int32 SrcX0 = DstX * SupersampleFactor;
-			FLinearColor Sum = FLinearColor::Black;
-			for (int32 SubY = 0; SubY < SupersampleFactor; ++SubY)
-			{
-				const int32 RowOffset = (SrcY0 + SubY) * SrcWidth;
-				for (int32 SubX = 0; SubX < SupersampleFactor; ++SubX)
-				{
-					Sum += FLinearColor((*SrcPixels)[RowOffset + SrcX0 + SubX]);
-				}
-			}
-			DstPixels[DstY * DstWidth + DstX] = (Sum * InvSampleCount).ToFColor(true);
-		}
-	}
-
-	TArray64<uint8> CompressedPng;
-	FImageUtils::PNGCompressImageArray(DstWidth, DstHeight, TArrayView64<const FColor>(DstPixels.GetData(), DstPixels.Num()), CompressedPng);
-
+	// Reducao do supersample + compressao PNG + gravacao em background: na
+	// game thread isso travava o jogo a cada imagem salva. O resultado e o
+	// mesmo arquivo, so chega no disco um pouco depois (EndPlay e o fim da
+	// rodada esperam a fila esvaziar, ver WaitForPendingImageWrites).
 	IFileManager::Get().MakeDirectory(*OutDir, true);
-	const FString FilePath = FPaths::Combine(OutDir, FileName);
-	FFileHelper::SaveArrayToFile(TArrayView64<const uint8>(CompressedPng.GetData(), CompressedPng.Num()), *FilePath);
+	FString FilePath = FPaths::Combine(OutDir, FileName);
+	TArray<FColor> Pixels = (SrcPixels == &FreshPixels) ? MoveTemp(FreshPixels) : *SrcPixels;
+
+	// Se o disco/CPU nao acompanha a captura, segura aqui em vez de acumular
+	// buffers na memoria sem limite.
+	while (PendingImageWrites->GetValue() >= DroneCaptureInternal::MaxPendingImageWrites)
+	{
+		FPlatformProcess::Sleep(0.002f);
+	}
+	PendingImageWrites->Increment();
+
+	AsyncTask(ENamedThreads::AnyBackgroundThreadNormalTask,
+		[Counter = PendingImageWrites, Pixels = MoveTemp(Pixels), SrcWidth, SrcHeight, Factor, FilePath = MoveTemp(FilePath)]()
+		{
+			DroneCaptureInternal::DownsampleAndSavePng(Pixels, SrcWidth, SrcHeight, Factor, FilePath);
+			Counter->Decrement();
+		});
 }
 
 FString ADroneCaptureController::StatusToReasonString(EPoseCheckStatus Status)

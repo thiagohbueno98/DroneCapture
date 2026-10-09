@@ -46,6 +46,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Drone Capture", meta = (ClampMin = "1", ClampMax = "4"))
 	int32 SupersampleFactor = 2;
 
+	// Forca GI e reflexo por Lumen na captura RGB (SceneCaptureComponent2D
+	// desliga os dois por padrao). Desligar em projeto que NAO usa Lumen
+	// (Park: lightmaps + SSR, vindo do UE4) -- la o Lumen forcado ignora os
+	// lightmaps e da reflexo pior que o da camera normal do nivel; sem o
+	// override a captura segue o metodo do projeto.
+	UPROPERTY(EditAnywhere, Category = "Drone Capture")
+	bool bForceLumen = true;
+
 	// Segunda captura, so pra mascara de segmentacao do drone (ver
 	// ADroneCaptureController::CheckPoseFromMask) -- acha oclusao/bbox a
 	// partir dos pixels de verdade em vez de raycast+projecao geometrica.

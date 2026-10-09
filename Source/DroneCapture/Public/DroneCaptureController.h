@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "HAL/ThreadSafeCounter.h"
 #include "GameFramework/Actor.h"
 #include "DroneCaptureTarget.h"
 #include "DroneCaptureController.generated.h"
@@ -267,6 +268,15 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Drone Capture")
 	bool bApplyQualitySettingsOnStart = true;
 
+	// Desliga a renderizacao do mundo na janela do jogo enquanto a captura
+	// roda (so o HUD de progresso continua aparecendo, em fundo preto).
+	// DESLIGADO por padrao: testado no Park (2026-10-09), a imagem salva
+	// PIORA -- o lago perde o reflexo e o ceu perde as nuvens, que pelo visto
+	// so sao atualizados quando a janela principal renderiza. O ganho de
+	// tempo tambem foi pequeno.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Capture")
+	bool bDisableViewportRenderingWhileCapturing = false;
+
 	// ------------------------------------------------------------------
 	// Espera de carregamento do mapa -- achado rodando city1 (2026-09-23):
 	// as primeiras poses saiam com carros/trafego ainda nao renderizados
@@ -445,7 +455,7 @@ private:
 	// preenche PendingBlurredRgbPixels por camera, restaura o angulo real
 	// da helice no final (a mascara, capturada logo depois, precisa bater
 	// com esse angulo).
-	void CapturePropellerMotionBlur();
+	void CapturePropellerMotionBlur(USceneCaptureComponent2D* RgbComp);
 	void ShowSetupMenu();
 	int32 GetYawCount() const { return bRandomYaw ? FMath::Max(1, YawSamplesPerPoint) : YawAnglesDeg.Num(); }
 
@@ -461,6 +471,34 @@ private:
 	// mudanca de cada CVar) e RestoreCVars volta tudo no EndPlay.
 	void SetCVarRemembering(const TCHAR* Name, const FString& Value);
 	void RestoreCVars();
+
+	// Ver bDisableViewportRenderingWhileCapturing. So religa o que foi
+	// desligado por aqui.
+	void SetGameViewportWorldRendering(bool bEnabled);
+	bool bViewportRenderingDisabledByCapture = false;
+
+	// Imagens entregues pra compressao/gravacao em background e ainda nao
+	// terminadas (ver ExportCaptureToPng). Compartilhado com as tarefas, que
+	// podem terminar depois do ator.
+	TSharedRef<FThreadSafeCounter, ESPMode::ThreadSafe> PendingImageWrites = MakeShared<FThreadSafeCounter, ESPMode::ThreadSafe>();
+	void WaitForPendingImageWrites() const;
+
+	// Tempo acumulado por etapa da rodada -- gravado em <dataset>/tempos.txt
+	// e no log quando a rodada termina (WriteTimings).
+	struct FCaptureTimings
+	{
+		double WarmupSec = 0.0;
+		double BlurRenderSec = 0.0;
+		double BlurReadbackSec = 0.0;
+		double BlurCpuSec = 0.0;
+		double MaskSec = 0.0;
+		double ExportSec = 0.0;
+		int32 Poses = 0;
+		int32 Saved = 0;
+	};
+	FCaptureTimings Timings;
+	double PoseStartSeconds = 0.0;
+	void WriteTimings() const;
 	TMap<FString, FString> OriginalCVarValues;
 	void WriteDataYaml() const;
 

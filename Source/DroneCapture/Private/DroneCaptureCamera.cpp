@@ -170,10 +170,14 @@ void ADroneCaptureCamera::ConfigurePostProcess()
 
 	// SceneCaptureComponent2D desliga Lumen (GI + reflexos) por padrao --
 	// sem isso a imagem sai bem mais "chapada"/lavada que o viewport.
-	Pps.bOverride_DynamicGlobalIlluminationMethod = true;
-	Pps.DynamicGlobalIlluminationMethod = EDynamicGlobalIlluminationMethod::Lumen;
-	Pps.bOverride_ReflectionMethod = true;
-	Pps.ReflectionMethod = EReflectionMethod::Lumen;
+	// bForceLumen=false: sem override, vale o metodo do projeto (ver header).
+	Pps.bOverride_DynamicGlobalIlluminationMethod = bForceLumen;
+	Pps.bOverride_ReflectionMethod = bForceLumen;
+	if (bForceLumen)
+	{
+		Pps.DynamicGlobalIlluminationMethod = EDynamicGlobalIlluminationMethod::Lumen;
+		Pps.ReflectionMethod = EReflectionMethod::Lumen;
+	}
 
 	// Auto exposure precisa de tempo real passando entre frames pra
 	// convergir -- forcar velocidade maxima faz isso quase instantaneo.
