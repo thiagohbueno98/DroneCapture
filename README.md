@@ -20,6 +20,20 @@ A solução que ficou foi outra: em vez de calcular, o plugin captura duas fotos
 
 Fazer essa máscara respeitar oclusão de verdade (se tem uma parede na frente do drone, ele precisa mesmo sumir da máscara) deu mais trabalho do que parecia. A engine tem um jeito nativo de marcar um objeto para aparecer sozinho numa passada de renderização separada, mas por padrão esse marcador ignora tudo que não está marcado do mesmo jeito, então o drone continuava aparecendo atrás de paredes e cercas comuns. A correção compara a distância da câmera até o drone com a distância até qualquer outra coisa na frente dele, e só desenha o drone quando ele é realmente o objeto mais próximo naquele ponto da imagem.
 
+### Foto com o visual do jogo
+
+Por padrão, a foto RGB é a própria imagem da janela do jogo, com a vista do jogador posta na câmera de captura (`bSaveGameViewAsRgb`, ligado). A captura de cena separada (`SceneCapture`) que a Unreal oferece não reproduz todo o acabamento da vista principal: num mapa urbano faltavam os reflexos de chão molhado, o tom ficava mais frio e a imagem mais "limpa" que a do jogo. A máscara continua vindo de uma captura de cena no mesmo frame, então a caixa bate com a foto.
+
+Nesse modo a rodada vai câmera por câmera (todas as poses de uma, depois a próxima), para a iluminação, o anti-aliasing e a exposição não recomeçarem do zero a cada pose. A hélice é borrada pelo próprio motion blur do motor, e a vista é renderizada acima da resolução da janela e reduzida (`GameViewScreenPercentage`, 200 por padrão).
+
+A janela do jogo precisa ter o mesmo tamanho configurado na câmera (`RtWidth` x `RtHeight`). Fora disso as fotos saem do tamanho da janela e o Output Log avisa. O jeito mais simples é rodar o projeto como jogo, fora do Editor, com a resolução na linha de comando:
+
+```
+UnrealEditor.exe <caminho>\<SeuProjeto>.uproject <Mapa> -game -ResX=1920 -ResY=1080 -ForceRes -windowed
+```
+
+Com `bSaveGameViewAsRgb` desligado, o plugin volta a fotografar pela captura de cena, e valem as duas seções abaixo.
+
 ### Fotos com menos ruído
 
 Renderizar em tempo real deixa um pouco de granulado na imagem, principalmente em bordas e reflexos. Para reduzir isso, cada foto é tirada numa resolução maior do que o tamanho final e depois reduzida fazendo a média dos pixels vizinhos, a mesma técnica usada em anti-aliasing de jogos. O resultado é uma imagem final mais limpa, sem custo perceptível de qualidade.
@@ -68,9 +82,11 @@ Não precisa rodar nenhum script, só arrastar 4 atores para dentro do nível:
 
 O plugin encontra esses atores sozinho ao apertar Play. Só é preciso apontar as referências na mão se você estiver usando classes próprias no lugar das do plugin.
 
+Um mesmo mapa pode ter várias posições de captura montadas. Dê o mesmo `ScenarioIndex` (1, 2, 3...) ao volume e às câmeras de cada posição e escolha qual usar no `ScenarioIndex` do `DroneCaptureController`. Com 0, o padrão, ele usa o que encontrar.
+
 ## Rodando
 
-Aperte **Play**. Vai aparecer um menu para configurar a captura: modelo de drone, onde salvar o dataset, o passo do grid, os ângulos em que o drone deve ser fotografado em cada posição, e o horário do dia. Clique em **Iniciar Captura** e acompanhe o progresso pelo Output Log.
+Aperte **Play**. Vai aparecer um menu para configurar a captura: modelo de drone, onde salvar o dataset, o passo do grid, os ângulos em que o drone deve ser fotografado em cada posição, e o horário do dia. Clique em **Iniciar Captura** e acompanhe o progresso pelo Output Log. A pasta padrão é `C:/DroneCapture`; troque no menu ou no `OutputDir` do `DroneCaptureController`.
 
 ### Ângulos do drone
 
@@ -94,4 +110,4 @@ Os modelos de drone que vêm com o plugin foram reaproveitados de pacotes de ter
 
 ## Limitações conhecidas
 
-Testado só no Windows, com Unreal 5.5, rodando dentro do Editor em modo Play. Não foi testado num jogo empacotado (standalone).
+Testado só no Windows, com Unreal 5.5, dentro do Editor em modo Play e como jogo pela linha de comando (`-game`). Não foi testado num jogo empacotado.

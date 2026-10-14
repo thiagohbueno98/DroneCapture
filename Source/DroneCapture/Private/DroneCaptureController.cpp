@@ -37,6 +37,8 @@
 #include "Engine/GameViewportClient.h"
 #include "HAL/PlatformProcess.h"
 #include "Modules/ModuleManager.h"
+#include "UnrealClient.h"
+#include "Components/WorldPartitionStreamingSourceComponent.h"
 
 namespace DroneCaptureInternal
 {
@@ -239,6 +241,18 @@ void ADroneCaptureController::StartCapture()
 	PoseIndex = 0;
 	Timings = FCaptureTimings();
 	WarmupFramesLeft = -1;
+	bAwaitingGameView = false;
+	bGameViewReady = false;
+	GameViewPixels.Reset();
+	LastWarmedCameraIndex = INDEX_NONE;
+	if (UsesGameView() && !GameViewScreenshotHandle.IsValid())
+	{
+		GameViewScreenshotHandle = UGameViewportClient::OnScreenshotCaptured().AddUObject(this, &ADroneCaptureController::OnGameViewScreenshot);
+	}
+	if (UsesGameView() && GameViewScreenPercentage > 0)
+	{
+		SetCVarRemembering(TEXT("r.ScreenPercentage"), FString::FromInt(GameViewScreenPercentage));
+	}
 	DiscardCountByReason.Reset();
 	bWaitingForLevelLoad = false;
 
@@ -278,8 +292,43 @@ void ADroneCaptureController::StopCapture()
 {
 	bIsRunning = false;
 	bWaitingForLevelLoad = false;
+	bAwaitingGameView = false;
+	if (GameViewScreenshotHandle.IsValid())
+	{
+		UGameViewportClient::OnScreenshotCaptured().Remove(GameViewScreenshotHandle);
+		GameViewScreenshotHandle.Reset();
+	}
 	SetGameViewportWorldRendering(true);
 	RestorePlayerView();
+}
+
+int32 ADroneCaptureController::GetTotalPoseCount() const
+{
+	return GridPoints.Num() * GetYawCount() * (UsesGameView() ? FMath::Max(1, Cameras.Num()) : 1);
+}
+
+void ADroneCaptureController::OnGameViewScreenshot(int32 Width, int32 Height, const TArray<FColor>& Bitmap)
+{
+	if (!bAwaitingGameView || bGameViewReady || Width <= 0 || Bitmap.Num() != Width * Height)
+	{
+		return;
+	}
+
+	GameViewPixels = Bitmap;
+	for (FColor& Pixel : GameViewPixels)
+	{
+		Pixel.A = 255;
+	}
+	GameViewSize = FIntPoint(Width, Height);
+	bGameViewReady = true;
+
+	const ADroneCaptureCamera* Cam = Cameras.IsValidIndex(ActiveCameraIndex) ? Cast<ADroneCaptureCamera>(Cameras[ActiveCameraIndex]) : nullptr;
+	if (Cam && !bWarnedGameViewSize && (Width != Cam->RtWidth || Height != Cam->RtHeight))
+	{
+		bWarnedGameViewSize = true;
+		UE_LOG(LogTemp, Warning, TEXT("[DroneCapture] Janela do jogo em %dx%d, diferente dos %dx%d da camera: as imagens saem do tamanho da janela, e a bbox so bate se a proporcao for a mesma."),
+			Width, Height, Cam->RtWidth, Cam->RtHeight);
+	}
 }
 
 void ADroneCaptureController::SetPlayerViewToCamera(int32 CameraIdx)
@@ -318,8 +367,23 @@ void ADroneCaptureController::SetPlayerViewToCamera(int32 CameraIdx)
 		// Um pouco mais aberto que a captura: a janela do jogo pode ter outra
 		// proporcao, e o reflexo so existe dentro do campo da vista principal.
 		const float CaptureFov = RgbComp ? RgbComp->FOVAngle : 90.0f;
-		ViewComp->SetFieldOfView(FMath::Min(CaptureFov + PlayerViewExtraFovDeg, 170.0f));
+		ViewComp->SetFieldOfView(FMath::Min(CaptureFov + (UsesGameView() ? 0.0f : PlayerViewExtraFovDeg), 170.0f));
 		ViewComp->SetConstraintAspectRatio(false);
+
+		if (UsesGameView())
+		{
+			// So a VELOCIDADE da exposicao automatica (o alvo continua o do
+			// nivel): depois de trocar de camera ela levava dezenas de frames
+			// pra chegar no valor final.
+			FPostProcessSettings& ViewPps = ViewComp->PostProcessSettings;
+			ViewPps.bOverride_AutoExposureSpeedUp = true;
+			ViewPps.AutoExposureSpeedUp = 20.0f;
+			ViewPps.bOverride_AutoExposureSpeedDown = true;
+			ViewPps.AutoExposureSpeedDown = 20.0f;
+			ViewPps.bOverride_MotionBlurAmount = GameViewMotionBlurAmount >= 0.0f;
+			ViewPps.MotionBlurAmount = FMath::Max(0.0f, GameViewMotionBlurAmount);
+			ViewComp->PostProcessBlendWeight = 1.0f;
+		}
 	}
 
 	if (PC->GetViewTarget() != PlayerViewCamera)
@@ -398,6 +462,11 @@ void ADroneCaptureController::WriteTimings() const
 	FString Text;
 	Text += FString::Printf(TEXT("poses=%d imagens_salvas=%d cameras=%d total=%.1fs (%.0f ms/pose)\n"), Timings.Poses, Timings.Saved, Cameras.Num(), TotalSec, TotalSec * PerPoseMs);
 	Text += FString::Printf(TEXT("WarmupCaptures=%d PropellerBlurSamples=%d\n"), WarmupCaptures, PropellerBlurSamples);
+	if (UsesGameView())
+	{
+		Text += FString::Printf(TEXT("rgb=janela do jogo %dx%d (1 pose = 1 camera) GameViewWarmupFrames=%d troca=%d helice=%.0f graus/frame motion_blur=%.2f tela=%d%%\n"),
+			GameViewSize.X, GameViewSize.Y, GameViewWarmupFrames, GameViewCameraSwitchWarmupFrames, GameViewPropellerStepDeg, GameViewMotionBlurAmount, GameViewScreenPercentage);
+	}
 	Text += TEXT("etapa: total_s | ms_por_pose | %% do total\n");
 	const auto AddLine = [&Text, PerPoseMs, TotalSec](const TCHAR* Name, double Sec)
 	{
@@ -479,7 +548,7 @@ void ADroneCaptureController::ShowProgressOnScreen(int32 Total) const
 
 float ADroneCaptureController::GetProgress() const
 {
-	const int32 Total = GridPoints.Num() * GetYawCount();
+	const int32 Total = GetTotalPoseCount();
 	if (Total <= 0)
 	{
 		return 0.0f;
@@ -531,8 +600,12 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 		return;
 	}
 
+	// Com bSaveGameViewAsRgb a rodada vai camera por camera: PoseIndex conta
+	// (camera, pose do grid) e LocalPose e a pose do grid dentro da camera.
 	const int32 YawCount = GetYawCount();
-	const int32 Total = GridPoints.Num() * YawCount;
+	const bool bGameView = UsesGameView();
+	const int32 PosesPerCamera = GridPoints.Num() * YawCount;
+	const int32 Total = GetTotalPoseCount();
 
 	if (PoseIndex >= Total)
 	{
@@ -553,8 +626,9 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 
 	ShowProgressOnScreen(Total);
 
-	const int32 PointIndex = PoseIndex / YawCount;
-	const int32 YawIdx = PoseIndex % YawCount;
+	const int32 LocalPose = bGameView ? PoseIndex % PosesPerCamera : PoseIndex;
+	const int32 PointIndex = LocalPose / YawCount;
+	const int32 YawIdx = LocalPose % YawCount;
 
 	// Fase 1 (WarmupFramesLeft == -1): pose nova -- move o drone e agenda os
 	// frames de aquecimento. A checagem de oclusao/bbox (via mascara, ver
@@ -576,10 +650,17 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 		// Vista do jogador na camera de captura (ver
 		// bMatchPlayerViewToCaptureCamera): com isso ligado as cameras sao
 		// processadas UMA POR VEZ, cada uma com o proprio aquecimento.
-		ActiveCameraIndex = 0;
+		ActiveCameraIndex = bGameView ? PoseIndex / PosesPerCamera : 0;
 		SetPlayerViewToCamera(ActiveCameraIndex);
 
 		WarmupFramesLeft = GetWarmupFrameCount();
+		if (bGameView)
+		{
+			WarmupFramesLeft = FMath::Max(1, ActiveCameraIndex != LastWarmedCameraIndex ? GameViewCameraSwitchWarmupFrames : GameViewWarmupFrames);
+			LastWarmedCameraIndex = ActiveCameraIndex;
+			// Fase da helice diferente a cada pose (o giro por frame e fixo).
+			PropellerSpinAngleDeg = FMath::FRandRange(0.0f, 360.0f);
+		}
 		PoseStartSeconds = FPlatformTime::Seconds();
 		return; // deixa os proximos Ticks (reais) acumularem o historico temporal
 	}
@@ -596,7 +677,8 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 			{
 				continue;
 			}
-			if (USceneCaptureComponent2D* RgbComp = CameraComponents.IsValidIndex(i) ? CameraComponents[i] : nullptr)
+			// Com bSaveGameViewAsRgb quem aquece e a propria janela do jogo.
+			if (USceneCaptureComponent2D* RgbComp = (!bGameView && CameraComponents.IsValidIndex(i)) ? CameraComponents[i] : nullptr)
 			{
 				RgbComp->CaptureScene();
 			}
@@ -629,7 +711,10 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 	// era feito tambem nas poses descartadas (mais da metade delas).
 	// Aquecimento medido em tempo de parede (inclui o frame inteiro do jogo:
 	// CaptureScene() so enfileira, o custo de GPU aparece no tempo do frame).
-	Timings.WarmupSec += FPlatformTime::Seconds() - PoseStartSeconds;
+	if (!bAwaitingGameView)
+	{
+		Timings.WarmupSec += FPlatformTime::Seconds() - PoseStartSeconds;
+	}
 
 	PendingBlurredRgbPixels.Reset();
 
@@ -650,47 +735,84 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 			continue;
 		}
 
-		const double MaskStartSeconds = FPlatformTime::Seconds();
-		MaskComp->CaptureScene();
-		FPoseCheckResult Result = CheckPoseFromMask(MaskComp);
-
 		const FString CamLabel = FString::Printf(TEXT("CaptureCam%d"), i + 1);
-		const FString SampleKey = FString::FromInt(PoseIndex);
+		const FString SampleKey = FString::FromInt(LocalPose);
 		const int32 SupersampleFactor = CamCapture ? FMath::Max(1, CamCapture->SupersampleFactor) : 1;
 
-		// Antes da checagem de silhueta abaixo, que sobrescreve o alvo da mascara.
-		if (bSaveMaskDebug)
+		FPoseCheckResult Result;
+		bool bSaveSample = false;
+		bool bSaveNegative = false;
+		if (bAwaitingGameView)
 		{
-			ExportMaskDebug(MaskComp, CamLabel, SampleKey);
-		}
-
-		// Poucos pixels visiveis: drone longe ou quase todo escondido? Compara
-		// com a silhueta inteira (ver OcclusionCheckPixelCount).
-		if (Result.Status == EPoseCheckStatus::Ok && MinVisibleFraction > 0.0f && Result.VisiblePixelCount < OcclusionCheckPixelCount)
-		{
-			const int32 FullPixelCount = CountUnoccludedDronePixels(MaskComp);
-			if (FullPixelCount > 0 && (float)Result.VisiblePixelCount < MinVisibleFraction * (float)FullPixelCount)
+			// Mascara ja checada num Tick anterior: so falta a imagem da janela.
+			if (!bGameViewReady)
 			{
-				Result.Status = EPoseCheckStatus::PoucoVisivel;
+				if (++GameViewWaitTicks > 30)
+				{
+					UE_LOG(LogTemp, Warning, TEXT("[DroneCapture] Screenshot da janela nao chegou em 30 frames (pose %d) -- pedindo de novo."), PoseIndex);
+					GameViewWaitTicks = 0;
+					FScreenshotRequest::RequestScreenshot(false);
+				}
+				return;
+			}
+			Result = PendingGameViewResult;
+			bSaveSample = bPendingSaveSample;
+			bSaveNegative = bPendingSaveNegative;
+		}
+		else
+		{
+			const double MaskStartSeconds = FPlatformTime::Seconds();
+			MaskComp->CaptureScene();
+			Result = CheckPoseFromMask(MaskComp);
+
+			// Antes da checagem de silhueta abaixo, que sobrescreve o alvo da mascara.
+			if (bSaveMaskDebug)
+			{
+				ExportMaskDebug(MaskComp, CamLabel, SampleKey);
+			}
+
+			// Poucos pixels visiveis: drone longe ou quase todo escondido? Compara
+			// com a silhueta inteira (ver OcclusionCheckPixelCount).
+			if (Result.Status == EPoseCheckStatus::Ok && MinVisibleFraction > 0.0f && Result.VisiblePixelCount < OcclusionCheckPixelCount)
+			{
+				const int32 FullPixelCount = CountUnoccludedDronePixels(MaskComp);
+				if (FullPixelCount > 0 && (float)Result.VisiblePixelCount < MinVisibleFraction * (float)FullPixelCount)
+				{
+					Result.Status = EPoseCheckStatus::PoucoVisivel;
+				}
+			}
+
+			// "Drone nao aparece pra essa camera" -- nenhum pixel da mascara
+			// detectado (oclusao total ou fora do campo de visao; a mascara nao
+			// distingue os dois casos, e nao precisa -- bbox_pequena ainda tem
+			// um drone de verdade visivel, so nao passou no criterio de
+			// qualidade, entao nao conta como negativo aqui).
+			const bool bDroneNotVisible = Result.Status == EPoseCheckStatus::Oclusao;
+
+			bSaveSample = Result.Status == EPoseCheckStatus::Ok;
+			bSaveNegative = !bSaveSample && bDroneNotVisible && bSaveNegativeSamples && FMath::FRand() < NegativeSampleChance;
+
+			Timings.MaskSec += FPlatformTime::Seconds() - MaskStartSeconds;
+
+			// A janela renderiza este mesmo estado de cena no Draw deste frame:
+			// mascara e imagem ficam do mesmo instante.
+			if (bGameView && (bSaveSample || bSaveNegative || bSaveDiscardDebug))
+			{
+				PendingGameViewResult = Result;
+				bPendingSaveSample = bSaveSample;
+				bPendingSaveNegative = bSaveNegative;
+				bAwaitingGameView = true;
+				bGameViewReady = false;
+				GameViewWaitTicks = 0;
+				FScreenshotRequest::RequestScreenshot(false);
+				return;
 			}
 		}
 
-		// "Drone nao aparece pra essa camera" -- nenhum pixel da mascara
-		// detectado (oclusao total ou fora do campo de visao; a mascara nao
-		// distingue os dois casos, e nao precisa -- bbox_pequena ainda tem
-		// um drone de verdade visivel, so nao passou no criterio de
-		// qualidade, entao nao conta como negativo aqui).
-		const bool bDroneNotVisible = Result.Status == EPoseCheckStatus::Oclusao;
-
-		const bool bSaveSample = Result.Status == EPoseCheckStatus::Ok;
-		const bool bSaveNegative = !bSaveSample && bDroneNotVisible && bSaveNegativeSamples && FMath::FRand() < NegativeSampleChance;
-
-		Timings.MaskSec += FPlatformTime::Seconds() - MaskStartSeconds;
-
 		// A mascara acima ja foi capturada no angulo real da helice; o blur
 		// varre ate esse mesmo angulo e o restaura no fim, entao mascara e
-		// RGB continuam batendo.
-		if (bSaveSample || bSaveNegative)
+		// RGB continuam batendo. Com bSaveGameViewAsRgb o borrao e o do motor.
+		if (!bGameView && (bSaveSample || bSaveNegative))
 		{
 			CapturePropellerMotionBlur(RgbComp);
 		}
@@ -720,11 +842,15 @@ void ADroneCaptureController::Tick(float DeltaSeconds)
 		}
 
 		Timings.ExportSec += FPlatformTime::Seconds() - ExportStartSeconds;
+
+		bAwaitingGameView = false;
+		bGameViewReady = false;
+		GameViewPixels.Reset();
 	}
 
 	// Proxima camera da MESMA pose: troca a vista do jogador e aquece de novo
 	// (o drone nao se mexe).
-	if (bMatchPlayerViewToCaptureCamera && ActiveCameraIndex + 1 < Cameras.Num())
+	if (!bGameView && bMatchPlayerViewToCaptureCamera && ActiveCameraIndex + 1 < Cameras.Num())
 	{
 		ActiveCameraIndex++;
 		SetPlayerViewToCamera(ActiveCameraIndex);
@@ -759,7 +885,9 @@ void ADroneCaptureController::SpinPropellers(float DeltaSeconds)
 		return;
 	}
 
-	PropellerSpinAngleDeg = FMath::Fmod(PropellerSpinAngleDeg + PropellerSpinDegPerSec * DeltaSeconds, 360.0f);
+	// Ver GameViewPropellerStepDeg.
+	const float StepDeg = (UsesGameView() && bIsRunning) ? GameViewPropellerStepDeg : PropellerSpinDegPerSec * DeltaSeconds;
+	PropellerSpinAngleDeg = FMath::Fmod(PropellerSpinAngleDeg + StepDeg, 360.0f);
 	SetPropellerSpinAngle(PropellerSpinAngleDeg);
 }
 
@@ -946,6 +1074,13 @@ void ADroneCaptureController::ResolveSceneReferences()
 	{
 		TArray<AActor*> Found;
 		UGameplayStatics::GetAllActorsOfClass(World, ADroneCaptureCamera::StaticClass(), Found);
+		if (ScenarioIndex > 0)
+		{
+			Found.RemoveAll([this](const AActor* Actor)
+			{
+				return CastChecked<ADroneCaptureCamera>(Actor)->ScenarioIndex != ScenarioIndex;
+			});
+		}
 		if (Found.Num() > 0)
 		{
 			Found.Sort([](const AActor& A, const AActor& B)
@@ -956,7 +1091,7 @@ void ADroneCaptureController::ResolveSceneReferences()
 			});
 			Cameras = Found;
 		}
-		else
+		else if (ScenarioIndex == 0)
 		{
 			for (int32 i = 1; i <= 32; ++i)
 			{
@@ -975,11 +1110,25 @@ void ADroneCaptureController::ResolveSceneReferences()
 	{
 		TArray<AActor*> Found;
 		UGameplayStatics::GetAllActorsOfClass(World, ADroneCaptureGridVolume::StaticClass(), Found);
+		if (ScenarioIndex > 0)
+		{
+			// Volume de outra posicao nao entra na rodada nem fica puxando o
+			// streaming do World Partition pra regiao dele.
+			Found.RemoveAll([this](const AActor* Actor)
+			{
+				const ADroneCaptureGridVolume* Volume = CastChecked<ADroneCaptureGridVolume>(Actor);
+				if (Volume->ScenarioIndex != ScenarioIndex && Volume->StreamingSource)
+				{
+					Volume->StreamingSource->DisableStreamingSource();
+				}
+				return Volume->ScenarioIndex != ScenarioIndex;
+			});
+		}
 		if (Found.Num() > 0)
 		{
 			GridVolume = Found[0];
 		}
-		else
+		else if (ScenarioIndex == 0)
 		{
 			UGameplayStatics::GetAllActorsWithTag(World, FName(TEXT("VolumeGrid")), Found);
 			if (Found.Num() > 0)
@@ -1477,20 +1626,23 @@ void ADroneCaptureController::ExportMaskDebug(USceneCaptureComponent2D* MaskComp
 
 void ADroneCaptureController::ExportCaptureToPng(USceneCaptureComponent2D* RgbComp, int32 SupersampleFactor, const FString& OutDir, const FString& FileName) const
 {
-	if (!RgbComp || !RgbComp->TextureTarget)
+	// Ver bSaveGameViewAsRgb: a imagem ja vem pronta da janela do jogo, no
+	// tamanho final.
+	const bool bFromGameView = GameViewPixels.Num() > 0;
+	if (!bFromGameView && (!RgbComp || !RgbComp->TextureTarget))
 	{
 		return;
 	}
 
-	const int32 SrcWidth = RgbComp->TextureTarget->SizeX;
-	const int32 SrcHeight = RgbComp->TextureTarget->SizeY;
+	const int32 SrcWidth = bFromGameView ? GameViewSize.X : RgbComp->TextureTarget->SizeX;
+	const int32 SrcHeight = bFromGameView ? GameViewSize.Y : RgbComp->TextureTarget->SizeY;
 
 	// Se o blur de helice esta ligado (ver CapturePropellerMotionBlur), usa
 	// o buffer JA MEDIADO entre varios sub-frames em vez de reler a GPU --
 	// a textura em si so tem o ULTIMO sub-frame capturado (nitido, sem
 	// blur nenhum).
 	TArray<FColor> FreshPixels;
-	const TArray<FColor>* SrcPixels = PendingBlurredRgbPixels.Find(RgbComp);
+	const TArray<FColor>* SrcPixels = bFromGameView ? &GameViewPixels : PendingBlurredRgbPixels.Find(RgbComp);
 
 	if (!SrcPixels)
 	{
@@ -1518,7 +1670,7 @@ void ADroneCaptureController::ExportCaptureToPng(USceneCaptureComponent2D* RgbCo
 		return;
 	}
 
-	const int32 Factor = FMath::Max(1, SupersampleFactor);
+	const int32 Factor = bFromGameView ? 1 : FMath::Max(1, SupersampleFactor);
 	if (SrcWidth / Factor <= 0 || SrcHeight / Factor <= 0)
 	{
 		return;

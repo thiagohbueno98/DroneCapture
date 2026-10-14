@@ -28,6 +28,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Drone Capture")
 	int32 CameraIndex = 0;
 
+	// Posicao de captura a que esta camera pertence -- ver
+	// ADroneCaptureController::ScenarioIndex.
+	UPROPERTY(EditAnywhere, Category = "Drone Capture", meta = (ClampMin = "0"))
+	int32 ScenarioIndex = 0;
+
 	UPROPERTY(EditAnywhere, Category = "Drone Capture")
 	int32 RtWidth = 1920;
 

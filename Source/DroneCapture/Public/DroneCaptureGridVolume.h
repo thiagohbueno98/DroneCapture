@@ -27,6 +27,11 @@ class DRONECAPTURE_API ADroneCaptureGridVolume : public AActor
 public:
 	ADroneCaptureGridVolume();
 
+	// Posicao de captura a que este volume pertence -- ver
+	// ADroneCaptureController::ScenarioIndex.
+	UPROPERTY(EditAnywhere, Category = "Drone Capture", meta = (ClampMin = "0"))
+	int32 ScenarioIndex = 0;
+
 	UPROPERTY(VisibleAnywhere, Category = "Drone Capture")
 	UBoxComponent* Bounds;
 

@@ -50,8 +50,7 @@ struct FPoseCheckResult
 
 /**
  * Porta nativa (C++) do pipeline de captura de dataset sintetico de drones,
- * antes implementado como Level Blueprint + ponte Python (ver
- * D:\TGv2\contexto.md, Pivo 3/4). Roda em Play mode -- CaptureScene() chamado
+ * antes implementado como Level Blueprint + ponte Python. Roda em Play mode -- CaptureScene() chamado
  * daqui nao tem o vazamento de memoria conhecido da engine que acontece
  * quando chamado via Python Editor Scripting fora do Play.
  *
@@ -80,6 +79,14 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Cena")
 	AActor* GridVolume = nullptr;
+
+	// Posicao de captura usada na rodada. Um nivel pode ter varias posicoes
+	// montadas, cada uma com 1 ADroneCaptureGridVolume e N ADroneCaptureCamera
+	// de mesmo ScenarioIndex; a descoberta automatica so pega os atores da
+	// posicao escolhida aqui, e os volumes das outras deixam de carregar o
+	// mapa em volta deles. 0 (padrao) = sem filtro, usa o que achar.
+	UPROPERTY(EditAnywhere, Category = "Drone Capture|Cena", meta = (ClampMin = "0"))
+	int32 ScenarioIndex = 0;
 
 	// ------------------------------------------------------------------
 	// Configuracao do grid / captura (equivalente a capture_core.py)
@@ -249,7 +256,7 @@ public:
 	// os dois deixa facil rodar varios datasets sem retypar o caminho
 	// inteiro toda vez (ex: no menu de setup, ver DroneCaptureSetupWidget).
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Saida")
-	FString OutputDir = TEXT("D:/TGv2");
+	FString OutputDir = TEXT("C:/DroneCapture");
 
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Saida")
 	FString DatasetName = TEXT("dataset_sintetico");
@@ -291,7 +298,53 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Capture")
 	bool bMatchPlayerViewToCaptureCamera = true;
 
-	// Folga somada ao FOV da captura na vista do jogador (ver acima).
+	// Salva como imagem RGB o que a janela do jogo renderiza (vista principal,
+	// ja posta na camera de captura por bMatchPlayerViewToCaptureCamera) em vez
+	// do SceneCapture. A captura de cena nao reproduz o acabamento da vista
+	// principal -- medido no City Sample em 2026-10-09: rua sem o reflexo de
+	// chao molhado, tom mais frio e imagem mais "limpa" que a janela, e nem
+	// ray tracing na captura nem os efeitos de camera do nivel fecharam a
+	// diferenca. Mascara e bbox continuam vindo do SceneCapture de mascara.
+	// A imagem sai do tamanho da janela: o jogo tem de rodar em RtWidth x
+	// RtHeight (-ResX/-ResY/-ForceRes num build ou janela standalone). Nesse modo a rodada vai camera por
+	// camera (todas as poses de uma, depois a proxima), pra vista principal
+	// nao perder o historico temporal (Lumen, TSR, exposicao) a cada pose, e o
+	// borrao da helice e o motion blur do proprio motor.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Capture", meta = (EditCondition = "bMatchPlayerViewToCaptureCamera"))
+	bool bSaveGameViewAsRgb = true;
+
+	// r.ScreenPercentage da vista principal durante a rodada com
+	// bSaveGameViewAsRgb. No padrao do motor a vista renderiza abaixo da
+	// resolucao da janela e o TSR amplia: a imagem salva saia bem mais mole
+	// que a do SceneCapture. Acima de 100 a vista e renderizada maior e
+	// reduzida (supersampling), como fazia o SupersampleFactor. 0 = nao mexe.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Capture", meta = (ClampMin = "0", ClampMax = "200", EditCondition = "bSaveGameViewAsRgb"))
+	int32 GameViewScreenPercentage = 200;
+
+	// Frames de jogo esperados depois de mover o drone, com a vista parada na
+	// mesma camera (ver bSaveGameViewAsRgb).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Capture", meta = (ClampMin = "1", EditCondition = "bSaveGameViewAsRgb"))
+	int32 GameViewWarmupFrames = 8;
+
+	// Frames de jogo esperados depois de trocar a vista de camera: Lumen, TSR
+	// e exposicao recomecam do zero.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Capture", meta = (ClampMin = "1", EditCondition = "bSaveGameViewAsRgb"))
+	int32 GameViewCameraSwitchWarmupFrames = 45;
+
+	// Giro da helice por frame durante a rodada com bSaveGameViewAsRgb: o
+	// motion blur do motor borra a helice ao longo desse arco. Fixo por frame
+	// (e nao por tempo) pro borrao nao depender da duracao do frame.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Capture|Helices", meta = (ClampMin = "0.0", ClampMax = "180.0", EditCondition = "bSaveGameViewAsRgb"))
+	float GameViewPropellerStepDeg = 40.0f;
+
+	// Quantidade de motion blur do motor na vista do jogador durante a rodada
+	// com bSaveGameViewAsRgb (PostProcess MotionBlurAmount). Negativo = deixa
+	// o que o nivel definir.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Capture|Helices", meta = (EditCondition = "bSaveGameViewAsRgb"))
+	float GameViewMotionBlurAmount = -1.0f;
+
+	// Folga somada ao FOV da captura na vista do jogador (ver acima). Sem
+	// efeito com bSaveGameViewAsRgb: a janela tem de ter o FOV exato da mascara.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Drone Capture", meta = (ClampMin = "0.0", ClampMax = "40.0", EditCondition = "bMatchPlayerViewToCaptureCamera"))
 	float PlayerViewExtraFovDeg = 10.0f;
 
@@ -312,7 +365,7 @@ public:
 	// podem precisar de mais). 0 desliga a espera fixa (so streaming, se
 	// bWaitForLevelStreamingComplete estiver ligado).
 	UPROPERTY(EditAnywhere, Category = "Drone Capture|Carregamento", meta = (ClampMin = "0.0"))
-	float MapLoadWaitSeconds = 15.0f;
+	float MapLoadWaitSeconds = 45.0f;
 
 	// Alem do tempo fixo acima, espera todo ULevelStreaming do mundo sair
 	// dos estados "carregando" (relevante em mapas com World Partition,
@@ -475,6 +528,7 @@ private:
 	// com esse angulo).
 	void CapturePropellerMotionBlur(USceneCaptureComponent2D* RgbComp);
 	void ShowSetupMenu();
+
 	int32 GetYawCount() const { return bRandomYaw ? FMath::Max(1, YawSamplesPerPoint) : YawAnglesDeg.Num(); }
 
 	// --------- equivalentes 1:1 de capture_core.py ---------
@@ -503,6 +557,25 @@ private:
 
 	// Ver bMatchPlayerViewToCaptureCamera.
 	void SetPlayerViewToCamera(int32 CameraIdx);
+
+	// Ver bSaveGameViewAsRgb. O screenshot da janela chega no Draw do frame
+	// em que foi pedido: a pose fica esperando (bAwaitingGameView) e so e
+	// exportada no Tick seguinte.
+	bool UsesGameView() const { return bSaveGameViewAsRgb && bMatchPlayerViewToCaptureCamera; }
+	int32 GetTotalPoseCount() const;
+	void OnGameViewScreenshot(int32 Width, int32 Height, const TArray<FColor>& Bitmap);
+	FDelegateHandle GameViewScreenshotHandle;
+	TArray<FColor> GameViewPixels;
+	FIntPoint GameViewSize = FIntPoint::ZeroValue;
+	bool bAwaitingGameView = false;
+	bool bGameViewReady = false;
+	bool bWarnedGameViewSize = false;
+	int32 GameViewWaitTicks = 0;
+	FPoseCheckResult PendingGameViewResult;
+	bool bPendingSaveSample = false;
+	bool bPendingSaveNegative = false;
+	int32 LastWarmedCameraIndex = INDEX_NONE;
+
 	void RestorePlayerView();
 	int32 GetWarmupFrameCount() const;
 	int32 ActiveCameraIndex = 0;

@@ -127,7 +127,7 @@ void UDroneCaptureSetupWidget::NativeOnInitialized()
 	Box->AddChildToVerticalBox(ModelComboBox);
 
 	AddLabel(TEXT("Pasta base de saida"));
-	OutputDirBox = AddEditBox(Controller ? Controller->OutputDir : TEXT("D:/TGv2"));
+	OutputDirBox = AddEditBox(Controller ? Controller->OutputDir : TEXT("C:/DroneCapture"));
 
 	AddLabel(TEXT("Nome do dataset"));
 	DatasetNameBox = AddEditBox(Controller ? Controller->DatasetName : TEXT("dataset_sintetico"));
