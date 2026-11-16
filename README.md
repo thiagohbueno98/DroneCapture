@@ -55,7 +55,10 @@ Um detector de verdade também precisa aprender a não enxergar drone onde não 
 ## Requisitos
 
 - Unreal Engine 5.5
-- Visual Studio 2022 com o componente de desenvolvimento em C++ (só necessário se você for compilar o plugin)
+- Visual Studio 2022 com:
+   - Desenvolvimento para desktop com C++
+   - Desenvolvimento de jogos com C++
+   - Desenvolvimento para desktop com .NET
 
 ## Instalando
 
